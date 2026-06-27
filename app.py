@@ -7,6 +7,9 @@ import streamlit as st
 import plotly.graph_objects as go
 import pandas as pd
 import io
+import os
+import json
+from pathlib import Path
 from datetime import datetime
 from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
@@ -29,15 +32,16 @@ st.set_page_config(
 # ── EDIT YOUR DETAILS HERE ────────────────────────────────────────────────────
 ADVISOR = {
     "name":     "Yash Wankar",
-    "title":    "Financial Consultant | CFP",
-    "phone":    "+91 88880 66706",
+    "title":    "Financial Advisor & Consultant | CFP",
+    "phone":    "+91 90286 93456",
     "whatsapp": "+91 90286 93456",
-    "email":    "ditiss88@gmail.com",
-    "address":  "Bengaluru, Karnataka – 560098",
+    "email":    "yashwankar@finsight.in",
+    "website":  "www.finsight.in",
+    "address":  "Bengaluru, Karnataka – 560001",
     "reg_no":   "INA000012345",
-    "tagline":  "Helping Indians build wealth the right way — fee-only, unbiased, goal-based.",
-    "linkedin": "linkedin.com/in/rahulsharmaadvisor",
-    "instagram":"@finsightadvisor",
+    "tagline":  "Helping Indians build wealth the right way — honest, unbiased, goal-based.",
+    "linkedin": "linkedin.com/in/yashwankar",
+    "instagram":"@yashwankar_finance",
 }
 
 PAGES = [
@@ -49,6 +53,35 @@ PAGES = [
     "📊  Dashboard & Report",
     "🤝  Consult an Advisor",
 ]
+
+
+# ── PAYMENT CONFIG ─────────────────────────────────────────────────────────────
+PAYMENT = {
+    "upi_id":   "yash04@icici",
+    "amount":   100,
+    "whatsapp": "9028693456",
+    "qr_note":  "Pay Rs.100 · UPI ID: yash04@icici",
+}
+
+# ── REPORTS FOLDER (auto-created next to app.py on the host machine) ───────────
+REPORTS_DIR = Path(__file__).parent / "finsight_reports"
+REPORTS_DIR.mkdir(exist_ok=True)
+META_FILE   = REPORTS_DIR / "_submissions.json"
+
+def save_report_to_disk(pdf_bytes, meta):
+    """Save PDF + metadata. Returns filename."""
+    ts    = datetime.now().strftime("%Y%m%d_%H%M%S")
+    safe  = (meta.get("name","Client") or "Client").replace(" ","_")
+    fname = f"{ts}_{safe}.pdf"
+    fpath = REPORTS_DIR / fname
+    fpath.write_bytes(pdf_bytes)
+    try:
+        existing = json.loads(META_FILE.read_text()) if META_FILE.exists() else []
+    except Exception:
+        existing = []
+    existing.append({**meta, "file": fname, "saved_at": ts})
+    META_FILE.write_text(json.dumps(existing, indent=2, ensure_ascii=False))
+    return fname
 
 # ══════════════════════════════════════════════════════════════════════════════
 # ░░  CSS  ░░
@@ -206,6 +239,8 @@ DEFS = {
     "gold_g":0.0,"gold_px":7400,"mf":0,"realty":0,"ef_mo":6,
     # retirement
     "ret_age":60,"ret_ret":12.0,"inflation":6.0,
+    # report state
+    "pdf_ready":False,"pdf_bytes":None,"pdf_filename":"",
 }
 for k, v in DEFS.items():
     if k not in st.session_state:
@@ -1342,38 +1377,186 @@ elif page == "📊  Dashboard & Report":
     })
     st.dataframe(nw_df, use_container_width=True, hide_index=True)
 
-    # ── PDF Download ──────────────────────────────────────────────────────────
+    # ── Health Score Reveal + Payment Gate ───────────────────────────────────
     st.markdown("---")
-    st.markdown('<p class="stl">⬇️ Download Your Financial Report</p>', unsafe_allow_html=True)
-    st.markdown(f'<div class="ab b">📄 Your personalised report includes: income analysis, expense breakdown, investment projections, EPF corpus, insurance review, health score, retirement plan, and advisor contact details from <b>{ADVISOR["name"]}</b>.</div>', unsafe_allow_html=True)
+    st.markdown('<p class="stl">🎯 Your Financial Health Score</p>', unsafe_allow_html=True)
+
+    # Big score card — always visible, free
+    sc_color  = "#0e6b4a" if score>=75 else "#f59e0b" if score>=55 else "#f97316" if score>=35 else "#ef4444"
+    sc_bg     = "#f0fdf4" if score>=75 else "#fffbeb" if score>=55 else "#fff7ed" if score>=35 else "#fef2f2"
+    sc_border = "#86efac" if score>=75 else "#fcd34d" if score>=55 else "#fdba74" if score>=35 else "#fca5a5"
+    s_ico2, s_lbl2 = hbadge(score)
+
+    st.markdown(f"""
+    <div style="background:{sc_bg};border:2px solid {sc_border};border-radius:20px;padding:32px 36px;text-align:center;margin:12px 0">
+      <div style="font-size:4rem;line-height:1;margin-bottom:8px">{s_ico2}</div>
+      <div style="font-family:'DM Serif Display',serif;font-size:3.2rem;font-weight:700;color:{sc_color};line-height:1">{score}</div>
+      <div style="font-size:1rem;font-weight:600;color:{sc_color};letter-spacing:.04em;margin-top:4px">out of 100 &nbsp;·&nbsp; {s_lbl2}</div>
+      <div style="font-size:.85rem;color:#64748b;margin-top:12px;line-height:1.6;max-width:480px;margin-left:auto;margin-right:auto">
+        This score reflects your investment rate, expense control, insurance cover, emergency fund, debt load, and monthly surplus.
+        {"🎉 You're in great financial shape! Keep compounding." if score>=75 else
+         "💪 Good foundation. A few tweaks can push you to Excellent." if score>=55 else
+         "⚠️ Several gaps need attention. Your full report shows exactly what to fix." if score>=35 else
+         "🚨 Significant financial gaps detected. Your report contains a prioritised action plan."}
+      </div>
+    </div>""", unsafe_allow_html=True)
+
+    # Score breakdown bars (visible free)
+    st.markdown("**Score Breakdown:**")
+    for cat, got, mx, note in sb:
+        pb  = got/mx if mx else 0
+        bc  = "#0e6b4a" if pb==1 else "#f59e0b" if pb>.5 else "#ef4444"
+        st.markdown(f"""<div class="sbar">
+          <div class="sbar-hd"><span>{cat}</span><span style="color:{bc};font-weight:600">{got}/{mx}</span></div>
+          <div class="sbar-bg"><div class="sbar-fill" style="width:{int(pb*100)}%;background:{bc}"></div></div>
+          <div style="font-size:.7rem;color:#64748b;margin-top:2px">{note}</div>
+        </div>""", unsafe_allow_html=True)
+
+    # ── Payment Gate ──────────────────────────────────────────────────────────
     st.markdown("")
+    st.markdown('<p class="stl">📄 Download Full Financial Report</p>', unsafe_allow_html=True)
 
-    try:
-        pdf_data = build_pdf(t, score, sb, ins, warn, dng)
-        fname_pdf = f"FinSight_Report_{(s.name or 'Client').replace(' ','_')}_{datetime.now().strftime('%d%b%Y')}.pdf"
-        dl_col, sp_col = st.columns([2,3])
-        with dl_col:
-            st.download_button(
-                label="⬇️  Download Full Financial Report (PDF)",
-                data=pdf_data,
-                file_name=fname_pdf,
-                mime="application/pdf",
+    # What's locked
+    st.markdown(f"""
+    <div style="background:linear-gradient(135deg,#0f2d52,#0e6b4a);border-radius:16px;padding:24px 28px;color:white;margin:12px 0">
+      <div style="font-family:'DM Serif Display',serif;font-size:1.4rem;margin-bottom:10px">🔒 Full Report — ₹100 only</div>
+      <div style="font-size:.88rem;opacity:.88;line-height:1.8">
+        ✅ Complete income & expense analysis &nbsp;·&nbsp; ✅ SIP projections (15/20/30 yr)<br>
+        ✅ EPF retirement corpus forecast &nbsp;·&nbsp; ✅ Insurance gap analysis<br>
+        ✅ Personalised action items &nbsp;·&nbsp; ✅ Retirement gap & shortfall plan<br>
+        ✅ Net worth statement &nbsp;·&nbsp; ✅ Advisor contact, services & pricing<br><br>
+        <span style="opacity:.65;font-size:.8rem">A one-time fee of just ₹100 gets you a professionally formatted PDF — your complete financial picture in one document.</span>
+      </div>
+    </div>""", unsafe_allow_html=True)
+
+    # Payment instructions
+    pc1, pc2 = st.columns([1,1])
+    with pc1:
+        st.markdown(f"""
+        <div style="background:#fff;border:2px solid #e2e8f0;border-radius:16px;padding:24px 28px;text-align:center">
+          <div style="font-size:.75rem;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:#94a3b8;margin-bottom:12px">Step 1 — Pay ₹100</div>
+          <div style="font-size:2.2rem;margin-bottom:8px">📱</div>
+          <div style="font-family:'JetBrains Mono',monospace;font-size:1.35rem;font-weight:700;color:#0f2d52;background:#f1f5f9;border-radius:10px;padding:10px 18px;margin:10px 0;letter-spacing:.03em">{PAYMENT["upi_id"]}</div>
+          <div style="font-size:.82rem;color:#64748b;margin-top:8px">Open any UPI app (GPay, PhonePe, Paytm, BHIM)<br>Search or scan: <b>{PAYMENT["upi_id"]}</b><br>Amount: <b>₹{PAYMENT["amount"]}</b></div>
+        </div>""", unsafe_allow_html=True)
+    with pc2:
+        st.markdown(f"""
+        <div style="background:#fff;border:2px solid #e2e8f0;border-radius:16px;padding:24px 28px;text-align:center">
+          <div style="font-size:.75rem;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:#94a3b8;margin-bottom:12px">Step 2 — Send Screenshot</div>
+          <div style="font-size:2.2rem;margin-bottom:8px">💬</div>
+          <div style="font-family:'JetBrains Mono',monospace;font-size:1.35rem;font-weight:700;color:#0f2d52;background:#f1f5f9;border-radius:10px;padding:10px 18px;margin:10px 0;letter-spacing:.03em">+91 {PAYMENT["whatsapp"]}</div>
+          <div style="font-size:.82rem;color:#64748b;margin-top:8px">WhatsApp your payment screenshot<br>to <b>+91 {PAYMENT["whatsapp"]}</b><br>We'll send your PDF report within <b>2 hours</b></div>
+        </div>""", unsafe_allow_html=True)
+
+    st.markdown(f"""
+    <div style="background:#fffbeb;border:1px solid #fcd34d;border-radius:12px;padding:14px 20px;margin:12px 0;font-size:.86rem;color:#78350f;text-align:center">
+      💡 After payment, share the screenshot on WhatsApp <b>+91 {PAYMENT["whatsapp"]}</b> along with your name.<br>
+      Your personalised PDF report will be sent to you directly within 2 hours (usually much faster!).
+    </div>""", unsafe_allow_html=True)
+
+    # ── Screenshot upload + confirm ─────────────────────────────────────────────
+    # KEY FIX: PDF bytes are stored in session_state so Streamlit Cloud reruns
+    # don't lose the data when the download button is clicked.
+    st.markdown("")
+    st.markdown("**Already paid? Upload your screenshot to confirm:**")
+
+    up_col, info_col = st.columns([1,1])
+    with up_col:
+        screenshot = st.file_uploader(
+            "📸 Upload payment screenshot",
+            type=["jpg","jpeg","png"],
+            help="Upload the payment success screenshot from your UPI app"
+        )
+    with info_col:
+        user_phone = st.text_input(
+            "Your WhatsApp number (for delivery)",
+            placeholder="+91 XXXXX XXXXX",
+            help="We will send the report to this number on WhatsApp"
+        )
+
+    if screenshot is not None:
+        st.image(screenshot, caption="Payment screenshot received ✅", width=260)
+
+        # ── Generate button: builds PDF and caches in session_state ───────────
+        if st.button("✅ Confirm Payment & Generate My Report", type="primary", use_container_width=True):
+            with st.spinner("Building your personalised report…"):
+                try:
+                    pdf_data  = build_pdf(t, score, sb, ins, warn, dng)
+                    fname_pdf = (
+                        f"FinSight_Report_{(s.name or 'Client').replace(' ','_')}"
+                        f"_{datetime.now().strftime('%d%b%Y_%H%M')}.pdf"
+                    )
+                    # Cache in session_state — survives the next Streamlit rerun
+                    st.session_state.pdf_ready    = True
+                    st.session_state.pdf_bytes    = pdf_data
+                    st.session_state.pdf_filename = fname_pdf
+
+                    # Save to disk (works when running locally / on a VPS)
+                    try:
+                        saved_name = save_report_to_disk(pdf_data, {
+                            "name":        s.name or "Unknown",
+                            "age":         s.age,
+                            "city":        s.city,
+                            "salary":      s.salary,
+                            "score":       score,
+                            "score_label": s_lbl2,
+                            "net_worth":   t["net_worth"],
+                            "phone":       user_phone,
+                            "paid":        True,
+                            "upi_id":      PAYMENT["upi_id"],
+                        })
+                        # Save screenshot alongside
+                        ext      = screenshot.name.split(".")[-1]
+                        ss_fname = (
+                            f"{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                            f"_{(s.name or 'Client').replace(' ','_')}_ss.{ext}"
+                        )
+                        (REPORTS_DIR / ss_fname).write_bytes(screenshot.getvalue())
+                        st.session_state.saved_name = saved_name
+                    except Exception:
+                        st.session_state.saved_name = "cloud-mode (no local disk)"
+
+                    st.rerun()   # rerun so download button renders cleanly
+
+                except Exception as e:
+                    st.error(
+                        f"Report generation error: {e}. "
+                        f"Please WhatsApp +91 {PAYMENT['whatsapp']} directly."
+                    )
+
+    # ── Download button: always rendered if pdf_ready (survives reruns) ───────
+    if st.session_state.get("pdf_ready") and st.session_state.get("pdf_bytes"):
+        st.success(
+            f"🎉 Report ready! Download below. "
+            f"We will also send it to you on WhatsApp +91 {PAYMENT['whatsapp']} shortly."
+        )
+        st.download_button(
+            label="⬇️  Download Your Financial Report (PDF)",
+            data=st.session_state.pdf_bytes,
+            file_name=st.session_state.pdf_filename,
+            mime="application/pdf",
+            use_container_width=True,
+        )
+        saved = st.session_state.get("saved_name","")
+        if saved and saved != "cloud-mode (no local disk)":
+            st.markdown(
+                f'<div class="ab g">Report saved on advisor system as: <code>{saved}</code></div>',
+                unsafe_allow_html=True
             )
-        with sp_col:
-            st.markdown(f"""
-            <div style="padding:14px 20px;background:#f0fdf4;border:1px solid #86efac;border-radius:12px;margin-top:4px">
-              <div style="font-size:.75rem;font-weight:700;color:#15803d;text-transform:uppercase;letter-spacing:.05em">What's in the report</div>
-              <div style="font-size:.83rem;color:#14532d;margin-top:4px;line-height:1.6">
-              ✅ Income & expense deep-dive &nbsp;·&nbsp; ✅ All investment projections<br>
-              ✅ EPF retirement corpus &nbsp;·&nbsp; ✅ Insurance coverage analysis<br>
-              ✅ Financial health score &nbsp;·&nbsp; ✅ Retirement gap analysis<br>
-              ✅ Personalised action items &nbsp;·&nbsp; ✅ Advisor contact & services
-              </div>
-            </div>""", unsafe_allow_html=True)
-    except Exception as e:
-        st.error(f"PDF generation error: {e}")
 
-    st.markdown("---")
+    elif screenshot is None:
+        # Locked placeholder — no screenshot uploaded yet
+        st.markdown("""
+        <div style="background:#f8fafc;border:2px dashed #e2e8f0;border-radius:14px;
+                    padding:28px;text-align:center;margin:12px 0">
+          <div style="font-size:2rem;margin-bottom:8px">🔒</div>
+          <div style="font-weight:600;color:#64748b">Upload your payment screenshot above to unlock the report</div>
+          <div style="font-size:.8rem;color:#94a3b8;margin-top:6px">
+            Download button appears here after screenshot is confirmed
+          </div>
+        </div>""", unsafe_allow_html=True)
+
+        st.markdown("---")
     st.caption("FinSight is a financial planning tool. Projections are indicative based on assumed rates. Consult a SEBI-registered advisor before making financial decisions. Mutual fund investments are subject to market risks.")
     nav(next_label="Talk to an Advisor →")
 
@@ -1425,8 +1608,9 @@ elif page == "🤝  Consult an Advisor":
     st.markdown('<p class="stl">📞 Get in Touch</p>', unsafe_allow_html=True)
     ct = st.columns(4)
     contacts = [
-        ("📱","WhatsApp",ADVISOR["phone"],"Only WhatsApp call — free 15-min discovery call"),
+        ("📱","Phone / WhatsApp",ADVISOR["phone"],"Call or WhatsApp — free 15-min discovery call"),
         ("📧","Email",ADVISOR["email"],"Queries, plans & documents"),
+        ("🌐","Website",ADVISOR["website"],"Blog, resources & booking"),
         ("📍","Location",ADVISOR["address"],"In-person by appointment"),
     ]
     for col,(icon,lbl,val,note) in zip(ct,contacts):
