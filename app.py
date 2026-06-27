@@ -1,12 +1,15 @@
 """
-FinSight — Personal Financial Advisor  v3
-Complete app: 7 pages · next/back nav · PDF download · advisor branding
+FinSight v6 — Financial Advisor Portal
+Features: Login/Signup · 7-page calculator · Payment-gated PDF · Admin dashboard
 """
 
 import streamlit as st
 import plotly.graph_objects as go
 import pandas as pd
 import io
+import os
+import json
+from pathlib import Path
 import os
 import json
 from pathlib import Path
@@ -18,6 +21,9 @@ from reportlab.lib.units import mm
 from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer, Table,
                                  TableStyle, HRFlowable, PageBreak)
 from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
+import bcrypt
+from auth import signup, login, save_user_report, all_users, get_user
+from admin import render as render_admin
 
 # ══════════════════════════════════════════════════════════════════════════════
 # ░░  CONFIG  ░░
@@ -34,7 +40,12 @@ ADVISOR = {
     "name":     "Yash Wankar",
     "title":    "Financial Advisor & Consultant | CFP",
     "phone":    "+91 90286 93456",
+    "title":    "Financial Advisor & Consultant | CFP",
+    "phone":    "+91 90286 93456",
     "whatsapp": "+91 90286 93456",
+    "email":    "yashwankar@finsight.in",
+    "website":  "www.finsight.in",
+    "address":  "Bengaluru, Karnataka – 560001",
     "email":    "yashwankar@finsight.in",
     "website":  "www.finsight.in",
     "address":  "Bengaluru, Karnataka – 560001",
@@ -218,6 +229,11 @@ div[data-testid="stSidebar"] .stRadio label { color:#b0c0d0 !important; font-siz
 # ══════════════════════════════════════════════════════════════════════════════
 DEFS = {
     "pg": 0,
+    "auth_logged_in": False,
+    "auth_user": "",
+    "auth_role": "user",
+    "auth_full_name": "",
+    "auth_email": "",
     # profile
     "name":"", "age":28, "city":"Bengaluru",
     "occupation":"Salaried (Private)", "dependents":0, "marital":"Single",
@@ -239,6 +255,8 @@ DEFS = {
     "gold_g":0.0,"gold_px":7400,"mf":0,"realty":0,"ef_mo":6,
     # retirement
     "ret_age":60,"ret_ret":12.0,"inflation":6.0,
+    # report state
+    "pdf_ready":False,"pdf_bytes":None,"pdf_filename":"",
     # report state
     "pdf_ready":False,"pdf_bytes":None,"pdf_filename":"",
 }
@@ -856,12 +874,141 @@ def build_pdf(t, score, sb, ins, warn, dng):
     return buf.getvalue()
 
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ░░  AUTH CSS (injected into existing <style> block via extra markdown)  ░░
+# ══════════════════════════════════════════════════════════════════════════════
+AUTH_EXTRA_CSS = """
+<style>
+.auth-wrap { max-width:460px; margin:60px auto 0; }
+.auth-card {
+  background:#fff; border:1px solid #e2e8f0; border-radius:20px;
+  padding:36px 40px; box-shadow:0 8px 32px rgba(15,45,82,.10);
+}
+.auth-logo {
+  font-family:'DM Serif Display',serif; font-size:2.4rem;
+  background:linear-gradient(135deg,#0f2d52,#0e6b4a);
+  -webkit-background-clip:text; -webkit-text-fill-color:transparent;
+  text-align:center; margin-bottom:4px;
+}
+.auth-sub { text-align:center; color:#64748b; font-size:.88rem; margin-bottom:28px; }
+.auth-tab-active {
+  background:linear-gradient(135deg,#0f2d52,#0e6b4a) !important;
+  color:#fff !important; border-radius:8px !important;
+  font-weight:600 !important;
+}
+.admin-pill {
+  display:inline-block; background:#fef9c3; color:#854d0e;
+  font-size:.72rem; font-weight:700; padding:2px 10px;
+  border-radius:20px; letter-spacing:.04em; text-transform:uppercase;
+  margin-left:8px; vertical-align:middle;
+}
+</style>
+"""
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ░░  AUTH GATE — shown before everything else  ░░
+# ══════════════════════════════════════════════════════════════════════════════
+st.markdown(AUTH_EXTRA_CSS, unsafe_allow_html=True)
+
+def do_logout():
+    for k in list(st.session_state.keys()):
+        del st.session_state[k]
+    st.rerun()
+
+if not st.session_state.get("auth_logged_in", False):
+    # ── Centered auth card ────────────────────────────────────────────────────
+    st.markdown('<div class="auth-wrap">', unsafe_allow_html=True)
+    st.markdown('''
+    <div class="auth-card">
+      <div class="auth-logo">💼 FinSight</div>
+      <div class="auth-sub">Your Personal Financial Advisor Portal</div>
+    </div>''', unsafe_allow_html=True)
+
+    tab_login, tab_signup = st.tabs(["🔑  Log In", "📝  Sign Up"])
+
+    with tab_login:
+        st.markdown("")
+        lu = st.text_input("Username", key="li_user", placeholder="your username")
+        lp = st.text_input("Password", type="password", key="li_pass", placeholder="••••••••")
+        st.markdown("")
+
+        # Admin shortcut hint (subtle)
+        st.markdown('<p style="font-size:.72rem;color:#94a3b8;text-align:center">Admin? Use your admin credentials to access the portal.</p>', unsafe_allow_html=True)
+
+        if st.button("Log In →", type="primary", use_container_width=True, key="btn_login"):
+            if lu.strip() == ADMIN_USER and lp == ADMIN_PASS:
+                st.session_state.auth_logged_in = True
+                st.session_state.auth_user      = ADMIN_USER
+                st.session_state.auth_role      = "admin"
+                st.session_state.auth_full_name = "Yash Wankar"
+                st.rerun()
+            else:
+                ok, msg, user = login(lu.strip(), lp)
+                if ok:
+                    st.session_state.auth_logged_in = True
+                    st.session_state.auth_user      = user["username"]
+                    st.session_state.auth_role      = "user"
+                    st.session_state.auth_full_name = user.get("full_name", user["username"])
+                    st.session_state.auth_email     = user.get("email","")
+                    # pre-fill name from account
+                    st.session_state.name = user.get("full_name","")
+                    st.rerun()
+                else:
+                    st.error(f"❌ {msg}")
+
+    with tab_signup:
+        st.markdown("")
+        su_name  = st.text_input("Full Name", key="su_name", placeholder="e.g. Arjun Mehta")
+        su_email = st.text_input("Email Address", key="su_email", placeholder="you@example.com")
+        su_user  = st.text_input("Choose Username", key="su_user", placeholder="min 3 characters, no spaces")
+        su_pass  = st.text_input("Password", type="password", key="su_pass", placeholder="min 6 characters")
+        su_pass2 = st.text_input("Confirm Password", type="password", key="su_pass2", placeholder="repeat password")
+        st.markdown("")
+
+        if st.button("Create Account →", type="primary", use_container_width=True, key="btn_signup"):
+            if su_pass != su_pass2:
+                st.error("❌ Passwords do not match.")
+            else:
+                ok, msg = signup(su_user.strip(), su_email.strip(), su_pass, su_name.strip())
+                if ok:
+                    st.success(f"✅ {msg} Please log in.")
+                else:
+                    st.error(f"❌ {msg}")
+
+    st.markdown('</div>', unsafe_allow_html=True)
+    st.stop()  # ← nothing below renders until logged in
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ░░  ADMIN ROUTE  ░░
+# ══════════════════════════════════════════════════════════════════════════════
+if st.session_state.get("auth_role") == "admin":
+    with st.sidebar:
+        st.markdown("## 💼 FinSight Admin")
+        st.markdown('<span class="admin-pill">ADMIN</span>', unsafe_allow_html=True)
+        st.markdown(f"Logged in as **{st.session_state.auth_full_name}**")
+        st.markdown("---")
+        if st.button("🚪 Logout", use_container_width=True):
+            do_logout()
+    render_admin()
+    st.stop()
+
 # ══════════════════════════════════════════════════════════════════════════════
 # ░░  SIDEBAR  ░░
 # ══════════════════════════════════════════════════════════════════════════════
 with st.sidebar:
     st.markdown("## 💼 FinSight")
     st.markdown("*Your financial clarity engine*")
+    st.markdown("---")
+    # ── User info strip ────────────────────────────────────────────────────────
+    uname_disp = st.session_state.get("auth_full_name", "") or st.session_state.get("auth_user","")
+    st.markdown(f'👤 **{uname_disp}**')
+    st.markdown(f'<p style="font-size:.72rem;color:#64748b;margin-top:-6px">`{st.session_state.get("auth_user","")}`</p>', unsafe_allow_html=True)
+    if st.button("🚪 Logout", use_container_width=True, key="user_logout"):
+        for k in list(st.session_state.keys()):
+            del st.session_state[k]
+        st.rerun()
     st.markdown("---")
     chosen = st.radio("", PAGES, index=st.session_state.pg, label_visibility="collapsed")
     if PAGES.index(chosen) != st.session_state.pg:
@@ -1378,7 +1525,42 @@ elif page == "📊  Dashboard & Report":
     st.dataframe(nw_df, use_container_width=True, hide_index=True)
 
     # ── Health Score Reveal + Payment Gate ───────────────────────────────────
+    # ── Health Score Reveal + Payment Gate ───────────────────────────────────
     st.markdown("---")
+    st.markdown('<p class="stl">🎯 Your Financial Health Score</p>', unsafe_allow_html=True)
+
+    # Big score card — always visible, free
+    sc_color  = "#0e6b4a" if score>=75 else "#f59e0b" if score>=55 else "#f97316" if score>=35 else "#ef4444"
+    sc_bg     = "#f0fdf4" if score>=75 else "#fffbeb" if score>=55 else "#fff7ed" if score>=35 else "#fef2f2"
+    sc_border = "#86efac" if score>=75 else "#fcd34d" if score>=55 else "#fdba74" if score>=35 else "#fca5a5"
+    s_ico2, s_lbl2 = hbadge(score)
+
+    st.markdown(f"""
+    <div style="background:{sc_bg};border:2px solid {sc_border};border-radius:20px;padding:32px 36px;text-align:center;margin:12px 0">
+      <div style="font-size:4rem;line-height:1;margin-bottom:8px">{s_ico2}</div>
+      <div style="font-family:'DM Serif Display',serif;font-size:3.2rem;font-weight:700;color:{sc_color};line-height:1">{score}</div>
+      <div style="font-size:1rem;font-weight:600;color:{sc_color};letter-spacing:.04em;margin-top:4px">out of 100 &nbsp;·&nbsp; {s_lbl2}</div>
+      <div style="font-size:.85rem;color:#64748b;margin-top:12px;line-height:1.6;max-width:480px;margin-left:auto;margin-right:auto">
+        This score reflects your investment rate, expense control, insurance cover, emergency fund, debt load, and monthly surplus.
+        {"🎉 You're in great financial shape! Keep compounding." if score>=75 else
+         "💪 Good foundation. A few tweaks can push you to Excellent." if score>=55 else
+         "⚠️ Several gaps need attention. Your full report shows exactly what to fix." if score>=35 else
+         "🚨 Significant financial gaps detected. Your report contains a prioritised action plan."}
+      </div>
+    </div>""", unsafe_allow_html=True)
+
+    # Score breakdown bars (visible free)
+    st.markdown("**Score Breakdown:**")
+    for cat, got, mx, note in sb:
+        pb  = got/mx if mx else 0
+        bc  = "#0e6b4a" if pb==1 else "#f59e0b" if pb>.5 else "#ef4444"
+        st.markdown(f"""<div class="sbar">
+          <div class="sbar-hd"><span>{cat}</span><span style="color:{bc};font-weight:600">{got}/{mx}</span></div>
+          <div class="sbar-bg"><div class="sbar-fill" style="width:{int(pb*100)}%;background:{bc}"></div></div>
+          <div style="font-size:.7rem;color:#64748b;margin-top:2px">{note}</div>
+        </div>""", unsafe_allow_html=True)
+
+    # ── Payment Gate ──────────────────────────────────────────────────────────
     st.markdown('<p class="stl">🎯 Your Financial Health Score</p>', unsafe_allow_html=True)
 
     # Big score card — always visible, free
@@ -1557,6 +1739,7 @@ elif page == "📊  Dashboard & Report":
         </div>""", unsafe_allow_html=True)
 
         st.markdown("---")
+        st.markdown("---")
     st.caption("FinSight is a financial planning tool. Projections are indicative based on assumed rates. Consult a SEBI-registered advisor before making financial decisions. Mutual fund investments are subject to market risks.")
     nav(next_label="Talk to an Advisor →")
 
@@ -1609,7 +1792,9 @@ elif page == "🤝  Consult an Advisor":
     ct = st.columns(4)
     contacts = [
         ("📱","Phone / WhatsApp",ADVISOR["phone"],"Call or WhatsApp — free 15-min discovery call"),
+        ("📱","Phone / WhatsApp",ADVISOR["phone"],"Call or WhatsApp — free 15-min discovery call"),
         ("📧","Email",ADVISOR["email"],"Queries, plans & documents"),
+        ("🌐","Website",ADVISOR["website"],"Blog, resources & booking"),
         ("🌐","Website",ADVISOR["website"],"Blog, resources & booking"),
         ("📍","Location",ADVISOR["address"],"In-person by appointment"),
     ]
