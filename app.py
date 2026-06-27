@@ -1,6 +1,6 @@
 """
-FinSight — Personal Financial Advisor  v3
-Complete app: 7 pages · next/back nav · PDF download · advisor branding
+FinSight v6 — Financial Advisor Portal
+Features: Login/Signup · 7-page calculator · Payment-gated PDF · Admin dashboard
 """
 
 import streamlit as st
@@ -18,6 +18,9 @@ from reportlab.lib.units import mm
 from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer, Table,
                                  TableStyle, HRFlowable, PageBreak)
 from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
+import bcrypt
+from auth import signup, login, save_user_report, all_users, get_user
+from admin import render as render_admin
 
 # ══════════════════════════════════════════════════════════════════════════════
 # ░░  CONFIG  ░░
@@ -44,6 +47,10 @@ ADVISOR = {
     "instagram":"@yashwankar_finance",
 }
 
+# ── ADMIN CREDENTIALS (change these!) ────────────────────────────────────────
+ADMIN_USER = "admin"
+ADMIN_PASS = "yash@admin2025"   # ← Change this before deploying!
+
 PAGES = [
     "🏠  Profile & Income",
     "💸  Expenses & EMIs",
@@ -64,23 +71,30 @@ PAYMENT = {
 }
 
 # ── REPORTS FOLDER (auto-created next to app.py on the host machine) ───────────
-REPORTS_DIR = Path(__file__).parent / "finsight_reports"
+DATA_DIR    = Path(__file__).parent / "data"
+REPORTS_DIR = DATA_DIR / "reports"
+SUBS_FILE   = DATA_DIR / "submissions.json"
+DATA_DIR.mkdir(exist_ok=True)
 REPORTS_DIR.mkdir(exist_ok=True)
-META_FILE   = REPORTS_DIR / "_submissions.json"
 
 def save_report_to_disk(pdf_bytes, meta):
-    """Save PDF + metadata. Returns filename."""
+    """Save PDF + metadata to data/reports/. Returns filename."""
     ts    = datetime.now().strftime("%Y%m%d_%H%M%S")
     safe  = (meta.get("name","Client") or "Client").replace(" ","_")
     fname = f"{ts}_{safe}.pdf"
-    fpath = REPORTS_DIR / fname
-    fpath.write_bytes(pdf_bytes)
+    (REPORTS_DIR / fname).write_bytes(pdf_bytes)
+    meta["pdf_file"]  = fname
+    meta["saved_at"]  = ts
     try:
-        existing = json.loads(META_FILE.read_text()) if META_FILE.exists() else []
+        existing = json.loads(SUBS_FILE.read_text()) if SUBS_FILE.exists() else []
     except Exception:
         existing = []
-    existing.append({**meta, "file": fname, "saved_at": ts})
-    META_FILE.write_text(json.dumps(existing, indent=2, ensure_ascii=False))
+    existing.append(meta)
+    SUBS_FILE.write_text(json.dumps(existing, indent=2, ensure_ascii=False))
+    # also attach to user account
+    uname = meta.get("username","")
+    if uname:
+        save_user_report(uname, {k: meta[k] for k in ["pdf_file","saved_at","score","score_label","net_worth"]})
     return fname
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -218,6 +232,11 @@ div[data-testid="stSidebar"] .stRadio label { color:#b0c0d0 !important; font-siz
 # ══════════════════════════════════════════════════════════════════════════════
 DEFS = {
     "pg": 0,
+    "auth_logged_in": False,
+    "auth_user": "",
+    "auth_role": "user",
+    "auth_full_name": "",
+    "auth_email": "",
     # profile
     "name":"", "age":28, "city":"Bengaluru",
     "occupation":"Salaried (Private)", "dependents":0, "marital":"Single",
@@ -856,12 +875,141 @@ def build_pdf(t, score, sb, ins, warn, dng):
     return buf.getvalue()
 
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ░░  AUTH CSS (injected into existing <style> block via extra markdown)  ░░
+# ══════════════════════════════════════════════════════════════════════════════
+AUTH_EXTRA_CSS = """
+<style>
+.auth-wrap { max-width:460px; margin:60px auto 0; }
+.auth-card {
+  background:#fff; border:1px solid #e2e8f0; border-radius:20px;
+  padding:36px 40px; box-shadow:0 8px 32px rgba(15,45,82,.10);
+}
+.auth-logo {
+  font-family:'DM Serif Display',serif; font-size:2.4rem;
+  background:linear-gradient(135deg,#0f2d52,#0e6b4a);
+  -webkit-background-clip:text; -webkit-text-fill-color:transparent;
+  text-align:center; margin-bottom:4px;
+}
+.auth-sub { text-align:center; color:#64748b; font-size:.88rem; margin-bottom:28px; }
+.auth-tab-active {
+  background:linear-gradient(135deg,#0f2d52,#0e6b4a) !important;
+  color:#fff !important; border-radius:8px !important;
+  font-weight:600 !important;
+}
+.admin-pill {
+  display:inline-block; background:#fef9c3; color:#854d0e;
+  font-size:.72rem; font-weight:700; padding:2px 10px;
+  border-radius:20px; letter-spacing:.04em; text-transform:uppercase;
+  margin-left:8px; vertical-align:middle;
+}
+</style>
+"""
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ░░  AUTH GATE — shown before everything else  ░░
+# ══════════════════════════════════════════════════════════════════════════════
+st.markdown(AUTH_EXTRA_CSS, unsafe_allow_html=True)
+
+def do_logout():
+    for k in list(st.session_state.keys()):
+        del st.session_state[k]
+    st.rerun()
+
+if not st.session_state.get("auth_logged_in", False):
+    # ── Centered auth card ────────────────────────────────────────────────────
+    st.markdown('<div class="auth-wrap">', unsafe_allow_html=True)
+    st.markdown('''
+    <div class="auth-card">
+      <div class="auth-logo">💼 FinSight</div>
+      <div class="auth-sub">Your Personal Financial Advisor Portal</div>
+    </div>''', unsafe_allow_html=True)
+
+    tab_login, tab_signup = st.tabs(["🔑  Log In", "📝  Sign Up"])
+
+    with tab_login:
+        st.markdown("")
+        lu = st.text_input("Username", key="li_user", placeholder="your username")
+        lp = st.text_input("Password", type="password", key="li_pass", placeholder="••••••••")
+        st.markdown("")
+
+        # Admin shortcut hint (subtle)
+        st.markdown('<p style="font-size:.72rem;color:#94a3b8;text-align:center">Admin? Use your admin credentials to access the portal.</p>', unsafe_allow_html=True)
+
+        if st.button("Log In →", type="primary", use_container_width=True, key="btn_login"):
+            if lu.strip() == ADMIN_USER and lp == ADMIN_PASS:
+                st.session_state.auth_logged_in = True
+                st.session_state.auth_user      = ADMIN_USER
+                st.session_state.auth_role      = "admin"
+                st.session_state.auth_full_name = "Yash Wankar"
+                st.rerun()
+            else:
+                ok, msg, user = login(lu.strip(), lp)
+                if ok:
+                    st.session_state.auth_logged_in = True
+                    st.session_state.auth_user      = user["username"]
+                    st.session_state.auth_role      = "user"
+                    st.session_state.auth_full_name = user.get("full_name", user["username"])
+                    st.session_state.auth_email     = user.get("email","")
+                    # pre-fill name from account
+                    st.session_state.name = user.get("full_name","")
+                    st.rerun()
+                else:
+                    st.error(f"❌ {msg}")
+
+    with tab_signup:
+        st.markdown("")
+        su_name  = st.text_input("Full Name", key="su_name", placeholder="e.g. Arjun Mehta")
+        su_email = st.text_input("Email Address", key="su_email", placeholder="you@example.com")
+        su_user  = st.text_input("Choose Username", key="su_user", placeholder="min 3 characters, no spaces")
+        su_pass  = st.text_input("Password", type="password", key="su_pass", placeholder="min 6 characters")
+        su_pass2 = st.text_input("Confirm Password", type="password", key="su_pass2", placeholder="repeat password")
+        st.markdown("")
+
+        if st.button("Create Account →", type="primary", use_container_width=True, key="btn_signup"):
+            if su_pass != su_pass2:
+                st.error("❌ Passwords do not match.")
+            else:
+                ok, msg = signup(su_user.strip(), su_email.strip(), su_pass, su_name.strip())
+                if ok:
+                    st.success(f"✅ {msg} Please log in.")
+                else:
+                    st.error(f"❌ {msg}")
+
+    st.markdown('</div>', unsafe_allow_html=True)
+    st.stop()  # ← nothing below renders until logged in
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ░░  ADMIN ROUTE  ░░
+# ══════════════════════════════════════════════════════════════════════════════
+if st.session_state.get("auth_role") == "admin":
+    with st.sidebar:
+        st.markdown("## 💼 FinSight Admin")
+        st.markdown('<span class="admin-pill">ADMIN</span>', unsafe_allow_html=True)
+        st.markdown(f"Logged in as **{st.session_state.auth_full_name}**")
+        st.markdown("---")
+        if st.button("🚪 Logout", use_container_width=True):
+            do_logout()
+    render_admin()
+    st.stop()
+
 # ══════════════════════════════════════════════════════════════════════════════
 # ░░  SIDEBAR  ░░
 # ══════════════════════════════════════════════════════════════════════════════
 with st.sidebar:
     st.markdown("## 💼 FinSight")
     st.markdown("*Your financial clarity engine*")
+    st.markdown("---")
+    # ── User info strip ────────────────────────────────────────────────────────
+    uname_disp = st.session_state.get("auth_full_name", "") or st.session_state.get("auth_user","")
+    st.markdown(f'👤 **{uname_disp}**')
+    st.markdown(f'<p style="font-size:.72rem;color:#64748b;margin-top:-6px">`{st.session_state.get("auth_user","")}`</p>', unsafe_allow_html=True)
+    if st.button("🚪 Logout", use_container_width=True, key="user_logout"):
+        for k in list(st.session_state.keys()):
+            del st.session_state[k]
+        st.rerun()
     st.markdown("---")
     chosen = st.radio("", PAGES, index=st.session_state.pg, label_visibility="collapsed")
     if PAGES.index(chosen) != st.session_state.pg:
@@ -1495,6 +1643,9 @@ elif page == "📊  Dashboard & Report":
                     try:
                         saved_name = save_report_to_disk(pdf_data, {
                             "name":        s.name or "Unknown",
+                            "full_name":   s.name or st.session_state.get("auth_full_name",""),
+                            "username":    st.session_state.get("auth_user",""),
+                            "email":       st.session_state.get("auth_email",""),
                             "age":         s.age,
                             "city":        s.city,
                             "salary":      s.salary,
@@ -1512,6 +1663,12 @@ elif page == "📊  Dashboard & Report":
                             f"_{(s.name or 'Client').replace(' ','_')}_ss.{ext}"
                         )
                         (REPORTS_DIR / ss_fname).write_bytes(screenshot.getvalue())
+                        # patch screenshot filename back into submissions log
+                        try:
+                            subs = json.loads(SUBS_FILE.read_text()) if SUBS_FILE.exists() else []
+                            if subs: subs[-1]["screenshot_file"] = ss_fname
+                            SUBS_FILE.write_text(json.dumps(subs, indent=2))
+                        except Exception: pass
                         st.session_state.saved_name = saved_name
                     except Exception:
                         st.session_state.saved_name = "cloud-mode (no local disk)"
