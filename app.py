@@ -10,10 +10,6 @@ import io
 import os
 import json
 from pathlib import Path
-import os
-import json
-from pathlib import Path
-from datetime import datetime
 from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
 from reportlab.lib.styles import ParagraphStyle
@@ -21,8 +17,10 @@ from reportlab.lib.units import mm
 from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer, Table,
                                  TableStyle, HRFlowable, PageBreak)
 from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
-import bcrypt
-from auth import signup, login, save_user_report, all_users, get_user
+from datetime import datetime, date
+from auth import (signup, login, login_by_mobile, save_user_report, all_users,
+                  get_user, save_finance, load_finance, update_profile,
+                  generate_otp, verify_otp, send_otp_sms, delete_user, admin_update_user)
 from admin import render as render_admin
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -38,12 +36,9 @@ st.set_page_config(
 # ── EDIT YOUR DETAILS HERE ────────────────────────────────────────────────────
 ADVISOR = {
     "name":     "Yash Wankar",
-    "title":    "Financial Advisor & Consultant | CFP",
+    "title":    "Financial Advisor & Consultant",
     "phone":    "+91 90286 93456",
     "whatsapp": "+91 90286 93456",
-    "email":    "yashwankar@finsight.in",
-    "website":  "www.finsight.in",
-    "address":  "Bengaluru, Karnataka – 560001",
     "email":    "yashwankar@finsight.in",
     "website":  "www.finsight.in",
     "address":  "Bengaluru, Karnataka – 560001",
@@ -53,8 +48,8 @@ ADVISOR = {
 }
 
 # ── ADMIN CREDENTIALS (change these!) ────────────────────────────────────────
-ADMIN_USER = "admin"
-ADMIN_PASS = "yash@admin2025"   # ← Change this before deploying!
+ADMIN_USER = "yashwankar"
+ADMIN_PASS = "Yash@2025#FS"   # ← Your admin password
 
 PAGES = [
     "🏠  Profile & Income",
@@ -64,6 +59,7 @@ PAGES = [
     "🏦  Savings & Assets",
     "📊  Dashboard & Report",
     "🤝  Consult an Advisor",
+    "👤  My Profile",
 ]
 
 
@@ -76,23 +72,30 @@ PAYMENT = {
 }
 
 # ── REPORTS FOLDER (auto-created next to app.py on the host machine) ───────────
-REPORTS_DIR = Path(__file__).parent / "finsight_reports"
+DATA_DIR    = Path(__file__).parent / "data"
+REPORTS_DIR = DATA_DIR / "reports"
+SUBS_FILE   = DATA_DIR / "submissions.json"
+DATA_DIR.mkdir(exist_ok=True)
 REPORTS_DIR.mkdir(exist_ok=True)
-META_FILE   = REPORTS_DIR / "_submissions.json"
 
 def save_report_to_disk(pdf_bytes, meta):
-    """Save PDF + metadata. Returns filename."""
+    """Save PDF + metadata to data/reports/. Returns filename."""
     ts    = datetime.now().strftime("%Y%m%d_%H%M%S")
     safe  = (meta.get("name","Client") or "Client").replace(" ","_")
     fname = f"{ts}_{safe}.pdf"
-    fpath = REPORTS_DIR / fname
-    fpath.write_bytes(pdf_bytes)
+    (REPORTS_DIR / fname).write_bytes(pdf_bytes)
+    meta["pdf_file"]  = fname
+    meta["saved_at"]  = ts
     try:
-        existing = json.loads(META_FILE.read_text()) if META_FILE.exists() else []
+        existing = json.loads(SUBS_FILE.read_text()) if SUBS_FILE.exists() else []
     except Exception:
         existing = []
-    existing.append({**meta, "file": fname, "saved_at": ts})
-    META_FILE.write_text(json.dumps(existing, indent=2, ensure_ascii=False))
+    existing.append(meta)
+    SUBS_FILE.write_text(json.dumps(existing, indent=2, ensure_ascii=False))
+    # also attach to user account
+    uname = meta.get("username","")
+    if uname:
+        save_user_report(uname, {k: meta[k] for k in ["pdf_file","saved_at","score","score_label","net_worth"]})
     return fname
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -235,6 +238,14 @@ DEFS = {
     "auth_role": "user",
     "auth_full_name": "",
     "auth_email": "",
+    "auth_mobile": "",
+    "auth_dob": "",
+    # otp state
+    "otp_sent": False,
+    "otp_identifier": "",
+    "otp_pending_user": {},
+    # finance persistence
+    "finance_loaded": False,
     # profile
     "name":"", "age":28, "city":"Bengaluru",
     "occupation":"Salaried (Private)", "dependents":0, "marital":"Single",
@@ -246,18 +257,17 @@ DEFS = {
     "emis":[],
     # investments
     "sip":0,"sip_rate":12.0,"stocks":0,"elss":0,"ppf":0,"nps":0,"other_inv":0,
+    "existing_stocks":0,"existing_ppf":0,"existing_nps":0,
     # EPF
     "has_epf":False,"epf_basic":0,"epf_pct":12,"epf_rate":8.15,
     "epf_yrs":30,"epf_existing":0,"epf_emp_mo":0,"epf_proj":0,
     # insurance
     "has_ins":False,"insurances":[],"ins_prem":0,
     # assets
-    "cash":0,"banks":1,"fd":0,"fd_rate":6.8,"fd_yrs":3,
+    "cash":0,"banks":1,"has_credit_card":False,"fd":0,"fd_rate":6.8,"fd_yrs":3,
     "gold_g":0.0,"gold_px":7400,"mf":0,"realty":0,"ef_mo":6,
     # retirement
     "ret_age":60,"ret_ret":12.0,"inflation":6.0,
-    # report state
-    "pdf_ready":False,"pdf_bytes":None,"pdf_filename":"",
     # report state
     "pdf_ready":False,"pdf_bytes":None,"pdf_filename":"",
 }
@@ -913,91 +923,198 @@ AUTH_EXTRA_CSS = """
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# ░░  AUTH GATE — shown before everything else  ░░
+# ░░  AUTH GATE  ░░
 # ══════════════════════════════════════════════════════════════════════════════
 st.markdown(AUTH_EXTRA_CSS, unsafe_allow_html=True)
 
 def do_logout():
-    for k in list(st.session_state.keys()):
-        del st.session_state[k]
+    for k in list(st.session_state.keys()): del st.session_state[k]
     st.rerun()
 
+def _do_user_login(user):
+    """Set session state after successful login and load saved finance data."""
+    st.session_state.auth_logged_in = True
+    st.session_state.auth_user      = user["username"]
+    st.session_state.auth_role      = "user"
+    st.session_state.auth_full_name = user.get("full_name", user["username"])
+    st.session_state.auth_email     = user.get("email","")
+    st.session_state.auth_mobile    = user.get("mobile","")
+    st.session_state.auth_dob       = user.get("dob","")
+    st.session_state.name           = user.get("full_name","")
+    st.session_state.age            = user.get("age", 28)
+    # Load persisted finance data
+    fd = load_finance(user["username"])
+    for k, v in fd.items():
+        st.session_state[k] = v
+    st.session_state.finance_loaded = True
+
 if not st.session_state.get("auth_logged_in", False):
-    # ── Centered auth card ────────────────────────────────────────────────────
     st.markdown('<div class="auth-wrap">', unsafe_allow_html=True)
-    st.markdown('''
+    st.markdown("""
     <div class="auth-card">
       <div class="auth-logo">💼 FinSight</div>
       <div class="auth-sub">Your Personal Financial Advisor Portal</div>
-    </div>''', unsafe_allow_html=True)
+    </div>""", unsafe_allow_html=True)
 
     tab_login, tab_signup = st.tabs(["🔑  Log In", "📝  Sign Up"])
 
+    # ════════════════════════════════════════════════════════════════════════
+    # LOGIN TAB
+    # ════════════════════════════════════════════════════════════════════════
     with tab_login:
         st.markdown("")
-        lu = st.text_input("Username", key="li_user", placeholder="your username")
-        lp = st.text_input("Password", type="password", key="li_pass", placeholder="••••••••")
+        login_method = st.radio("Login with:", ["Username & Password", "Mobile OTP"],
+                                 horizontal=True, key="li_method")
         st.markdown("")
 
-        # Admin shortcut hint (subtle)
-        st.markdown('<p style="font-size:.72rem;color:#94a3b8;text-align:center">Admin? Use your admin credentials to access the portal.</p>', unsafe_allow_html=True)
-
-        if st.button("Log In →", type="primary", use_container_width=True, key="btn_login"):
-            if lu.strip() == ADMIN_USER and lp == ADMIN_PASS:
-                st.session_state.auth_logged_in = True
-                st.session_state.auth_user      = ADMIN_USER
-                st.session_state.auth_role      = "admin"
-                st.session_state.auth_full_name = "Yash Wankar"
-                st.rerun()
-            else:
-                ok, msg, user = login(lu.strip(), lp)
-                if ok:
+        if login_method == "Username & Password":
+            lu = st.text_input("Username", key="li_user", placeholder="your username")
+            lp = st.text_input("Password", type="password", key="li_pass", placeholder="••••••••")
+            st.markdown('<p style="font-size:.72rem;color:#94a3b8;text-align:center">Admin? Use your admin credentials.</p>', unsafe_allow_html=True)
+            if st.button("Log In →", type="primary", use_container_width=True, key="btn_login_pw"):
+                if lu.strip() == ADMIN_USER and lp == ADMIN_PASS:
                     st.session_state.auth_logged_in = True
-                    st.session_state.auth_user      = user["username"]
-                    st.session_state.auth_role      = "user"
-                    st.session_state.auth_full_name = user.get("full_name", user["username"])
-                    st.session_state.auth_email     = user.get("email","")
-                    # pre-fill name from account
-                    st.session_state.name = user.get("full_name","")
+                    st.session_state.auth_user      = ADMIN_USER
+                    st.session_state.auth_role      = "admin"
+                    st.session_state.auth_full_name = "Yash Wankar"
                     st.rerun()
                 else:
-                    st.error(f"❌ {msg}")
+                    ok, msg, user = login(lu.strip(), lp)
+                    if ok: _do_user_login(user); st.rerun()
+                    else: st.error(f"❌ {msg}")
 
+        else:  # Mobile OTP login
+            li_mob = st.text_input("Mobile Number (10 digits)", key="li_mob", placeholder="9876543210")
+            if not st.session_state.get("otp_sent"):
+                if st.button("Send OTP →", type="primary", use_container_width=True, key="btn_send_otp_login"):
+                    ok, msg, user = login_by_mobile(li_mob.strip())
+                    if ok:
+                        otp = generate_otp(li_mob.strip())
+                        send_otp_sms(li_mob.strip(), otp)
+                        st.session_state.otp_sent        = True
+                        st.session_state.otp_identifier  = li_mob.strip()
+                        st.session_state.otp_pending_user = user
+                        st.info(f"📱 OTP sent to +91 {li_mob.strip()}. (Demo: your OTP is **{otp}**)")
+                        st.rerun()
+                    else: st.error(f"❌ {msg}")
+            else:
+                st.info(f"OTP sent to +91 {st.session_state.otp_identifier}")
+                li_otp = st.text_input("Enter 6-digit OTP", key="li_otp", placeholder="______", max_chars=6)
+                c1, c2 = st.columns(2)
+                with c1:
+                    if st.button("Verify OTP →", type="primary", use_container_width=True, key="btn_verify_login"):
+                        ok, msg = verify_otp(st.session_state.otp_identifier, li_otp)
+                        if ok:
+                            _do_user_login(st.session_state.otp_pending_user)
+                            st.session_state.otp_sent = False
+                            st.rerun()
+                        else: st.error(f"❌ {msg}")
+                with c2:
+                    if st.button("Resend OTP", use_container_width=True, key="btn_resend_login"):
+                        mob = st.session_state.otp_identifier
+                        otp = generate_otp(mob); send_otp_sms(mob, otp)
+                        st.info(f"📱 New OTP sent. (Demo: **{otp}**)")
+
+    # ════════════════════════════════════════════════════════════════════════
+    # SIGNUP TAB
+    # ════════════════════════════════════════════════════════════════════════
     with tab_signup:
         st.markdown("")
-        su_name  = st.text_input("Full Name", key="su_name", placeholder="e.g. Arjun Mehta")
-        su_email = st.text_input("Email Address", key="su_email", placeholder="you@example.com")
-        su_user  = st.text_input("Choose Username", key="su_user", placeholder="min 3 characters, no spaces")
-        su_pass  = st.text_input("Password", type="password", key="su_pass", placeholder="min 6 characters")
-        su_pass2 = st.text_input("Confirm Password", type="password", key="su_pass2", placeholder="repeat password")
+        su_name  = st.text_input("Full Name *", key="su_name",  placeholder="e.g. Arjun Mehta")
+        su_email = st.text_input("Email Address *", key="su_email", placeholder="you@example.com")
+        su_mob   = st.text_input("Mobile Number * (10 digits, no +91)", key="su_mob", placeholder="9876543210")
+        su_dob   = st.date_input("Date of Birth *", key="su_dob",
+                                  min_value=date(1950,1,1), max_value=date.today(),
+                                  value=date(1995,1,1))
+        su_user  = st.text_input("Choose Username *", key="su_user", placeholder="min 3 chars, no spaces")
+        su_pass  = st.text_input("Password *", type="password", key="su_pass", placeholder="min 6 characters")
+        su_pass2 = st.text_input("Confirm Password *", type="password", key="su_pass2")
         st.markdown("")
 
-        if st.button("Create Account →", type="primary", use_container_width=True, key="btn_signup"):
-            if su_pass != su_pass2:
-                st.error("❌ Passwords do not match.")
-            else:
-                ok, msg = signup(su_user.strip(), su_email.strip(), su_pass, su_name.strip())
-                if ok:
-                    st.success(f"✅ {msg} Please log in.")
+        # OTP verification before account creation
+        if not st.session_state.get("signup_otp_verified"):
+            if st.button("Send OTP & Verify Mobile →", type="primary", use_container_width=True, key="btn_signup_sendotp"):
+                mob = su_mob.strip()
+                if not mob.isdigit() or len(mob) != 10:
+                    st.error("❌ Enter a valid 10-digit mobile number.")
                 else:
-                    st.error(f"❌ {msg}")
+                    otp = generate_otp(f"signup_{mob}")
+                    send_otp_sms(mob, otp)
+                    st.session_state.otp_identifier = f"signup_{mob}"
+                    st.session_state.otp_sent = True
+                    st.info(f"📱 OTP sent to +91 {mob}. (Demo: your OTP is **{otp}**)")
+        else:
+            st.markdown('<div style="background:#f0fdf4;border:1px solid #86efac;border-radius:8px;padding:8px 14px;font-size:.85rem;color:#15803d;margin:4px 0">✅ Mobile number verified!</div>', unsafe_allow_html=True)
+
+        if st.session_state.get("otp_sent") and not st.session_state.get("signup_otp_verified"):
+            su_otp = st.text_input("Enter OTP to verify mobile", key="su_otp", placeholder="6-digit OTP", max_chars=6)
+            oc1, oc2 = st.columns(2)
+            with oc1:
+                if st.button("Verify OTP", use_container_width=True, key="btn_verify_signup_otp"):
+                    ok, msg = verify_otp(st.session_state.otp_identifier, su_otp)
+                    if ok:
+                        st.session_state.signup_otp_verified = True
+                        st.session_state.otp_sent = False
+                        st.success("✅ Mobile verified!")
+                        st.rerun()
+                    else: st.error(f"❌ {msg}")
+            with oc2:
+                if st.button("Resend OTP", use_container_width=True, key="btn_resend_signup"):
+                    mob = su_mob.strip()
+                    otp = generate_otp(f"signup_{mob}"); send_otp_sms(mob, otp)
+                    st.info(f"New OTP sent. (Demo: **{otp}**)")
+
+        if st.session_state.get("signup_otp_verified"):
+            if st.button("Create Account →", type="primary", use_container_width=True, key="btn_create_account"):
+                if su_pass != su_pass2:
+                    st.error("❌ Passwords do not match.")
+                elif not su_name.strip():
+                    st.error("❌ Full name is required.")
+                else:
+                    ok, msg = signup(su_user.strip(), su_name.strip(), su_email.strip(),
+                                     su_mob.strip(), str(su_dob), su_pass)
+                    if ok:
+                        st.success(f"✅ {msg} Please log in.")
+                        st.session_state.signup_otp_verified = False
+                    else: st.error(f"❌ {msg}")
 
     st.markdown('</div>', unsafe_allow_html=True)
-    st.stop()  # ← nothing below renders until logged in
+    st.stop()
 
 # ══════════════════════════════════════════════════════════════════════════════
 # ░░  ADMIN ROUTE  ░░
 # ══════════════════════════════════════════════════════════════════════════════
 if st.session_state.get("auth_role") == "admin":
     with st.sidebar:
-        st.markdown("## 💼 FinSight Admin")
+        st.markdown("## 💼 FinSight")
         st.markdown('<span class="admin-pill">ADMIN</span>', unsafe_allow_html=True)
         st.markdown(f"Logged in as **{st.session_state.auth_full_name}**")
         st.markdown("---")
-        if st.button("🚪 Logout", use_container_width=True):
+        if st.button("🚪 Logout", use_container_width=True, key="admin_logout"):
             do_logout()
     render_admin()
     st.stop()
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ░░  FINANCE DATA AUTO-SAVE ON EVERY PAGE CHANGE  ░░
+# ══════════════════════════════════════════════════════════════════════════════
+def _save_current_finance():
+    """Persist all finance keys to user account."""
+    finance_keys = [
+        "salary","other_income","annual_bonus","rent","groceries","utilities","transport",
+        "dining","entertainment","education","other_exp","emis",
+        "sip","sip_rate","stocks","elss","ppf","nps","other_inv",
+        "existing_stocks","existing_ppf","existing_nps",
+        "has_epf","epf_basic","epf_pct","epf_rate","epf_yrs","epf_existing","epf_emp_mo","epf_proj",
+        "has_ins","insurances","ins_prem",
+        "cash","banks","has_credit_card","fd","fd_rate","fd_yrs",
+        "gold_g","gold_px","mf","realty","ef_mo","ret_age","ret_ret","inflation",
+    ]
+    s  = st.session_state
+    fd = {k: getattr(s, k, s.get(k, None)) for k in finance_keys if k in s}
+    uname = s.get("auth_user","")
+    if uname:
+        save_finance(uname, fd)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # ░░  SIDEBAR  ░░
@@ -1006,28 +1123,27 @@ with st.sidebar:
     st.markdown("## 💼 FinSight")
     st.markdown("*Your financial clarity engine*")
     st.markdown("---")
-    # ── User info strip ────────────────────────────────────────────────────────
-    uname_disp = st.session_state.get("auth_full_name", "") or st.session_state.get("auth_user","")
-    st.markdown(f'👤 **{uname_disp}**')
-    st.markdown(f'<p style="font-size:.72rem;color:#64748b;margin-top:-6px">`{st.session_state.get("auth_user","")}`</p>', unsafe_allow_html=True)
+    uname_disp = st.session_state.get("auth_full_name","") or st.session_state.get("auth_user","")
+    st.markdown(f"👤 **{uname_disp}**")
+    st.markdown(f'<p style="font-size:.72rem;color:#64748b;margin-top:-4px">`{st.session_state.get("auth_user","")}`</p>', unsafe_allow_html=True)
     if st.button("🚪 Logout", use_container_width=True, key="user_logout"):
-        for k in list(st.session_state.keys()):
-            del st.session_state[k]
-        st.rerun()
+        _save_current_finance()
+        do_logout()
     st.markdown("---")
     chosen = st.radio("", PAGES, index=st.session_state.pg, label_visibility="collapsed")
     if PAGES.index(chosen) != st.session_state.pg:
+        _save_current_finance()
         st.session_state.pg = PAGES.index(chosen)
         st.rerun()
     st.markdown("---")
     s = st.session_state
-    filled = sum([bool(s.salary), bool(s.rent or s.groceries), bool(s.sip or s.ppf or s.has_epf),
-                  bool(s.has_ins), bool(s.cash or s.fd)])
-    st.progress(filled/5, text=f"Profile {filled}/5 complete")
-    if s.name: st.markdown(f"👤 **{s.name}**")
-    if s.salary: st.markdown(f"💰 {fmt(s.salary+s.other_income)}/mo")
+    filled = sum([bool(s.get("salary")), bool(s.get("rent") or s.get("groceries")),
+                  bool(s.get("sip") or s.get("ppf") or s.get("has_epf")),
+                  bool(s.get("has_ins")), bool(s.get("cash") or s.get("fd"))])
+    st.progress(filled/5, text=f"Finance {filled}/5 filled")
+    if s.get("salary"): st.markdown(f"💰 {fmt(s.salary+s.get('other_income',0))}/mo")
     st.markdown("---")
-    st.markdown('<p style="font-size:.72rem;color:#475569;line-height:1.6">Session-only. Nothing is stored.</p>', unsafe_allow_html=True)
+    st.markdown('<p style="font-size:.72rem;color:#475569;line-height:1.5">Data auto-saved to your account.</p>', unsafe_allow_html=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1059,11 +1175,22 @@ if page == "🏠  Profile & Income":
     with c2:
         st.markdown("**👨‍👩‍👧 Family & Income**")
         s.marital    = st.selectbox("Marital Status", ["Single","Married","Married with Kids"])
-        s.dependents = st.number_input("Financial Dependents (spouse, kids, parents)", 0, 10, s.dependents)
-        s.salary     = st.number_input("Take-Home Salary (₹/month)", 0, step=1000, value=s.salary, format="%d",
+        s.dependents = st.number_input("Financial Dependents (spouse, kids, parents)", 0, 10, s.get("dependents",0))
+        # DOB auto-fills from profile — show age derived from DOB
+        dob_str = s.get("auth_dob","")
+        if dob_str:
+            try:
+                from datetime import date as _date
+                _bd = datetime.strptime(dob_str, "%Y-%m-%d").date()
+                _td = _date.today()
+                _age = _td.year - _bd.year - ((_td.month, _td.day) < (_bd.month, _bd.day))
+                st.session_state.age = _age
+                st.markdown(f'<div class="ab g">🎂 Age auto-filled from your profile: <b>{_age} years</b> (DOB: {dob_str})</div>', unsafe_allow_html=True)
+            except Exception: pass
+        s.salary     = st.number_input("Take-Home Salary (₹/month)", 0, step=1000, value=s.get("salary",0), format="%d",
                                         help="Amount credited to your bank after all deductions")
-        s.other_income= st.number_input("Other Income — rent, freelance, dividends (₹/month)", 0, step=500, value=s.other_income, format="%d")
-        s.annual_bonus= st.number_input("Expected Annual Bonus (₹)", 0, step=5000, value=s.annual_bonus, format="%d")
+        s.other_income= st.number_input("Other Income — rent, freelance, dividends (₹/month)", 0, step=500, value=s.get("other_income",0), format="%d")
+        s.annual_bonus= st.number_input("Expected Annual Bonus (₹)", 0, step=5000, value=s.get("annual_bonus",0), format="%d")
 
     ti = s.salary + s.other_income
     if ti > 0:
@@ -1131,11 +1258,15 @@ elif page == "💸  Expenses & EMIs":
     with cc[3]: st.markdown(f'<div class="mc a"><div class="mc-lbl">Outstanding Debt</div><div class="mc-val">{fmt(sum(e["outstanding"] for e in emis))}</div></div>', unsafe_allow_html=True)
 
     if emis:
-        df = pd.DataFrame(emis)[["name","amount","months_left","rate","outstanding"]]
-        df.columns=["Loan","EMI/mo (₹)","Months Left","Rate %","Outstanding (₹)"]
+        df = pd.DataFrame(emis)[["name","amount","months_left","rate","outstanding","interest_cost"]]
+        df.columns=["Loan","EMI/mo (₹)","Months Left","Rate %","Outstanding (₹)","Interest Cost (est.)"]
         df["EMI/mo (₹)"]=df["EMI/mo (₹)"].apply(lambda x:f"₹{x:,}")
         df["Outstanding (₹)"]=df["Outstanding (₹)"].apply(lambda x:f"₹{x:,}")
+        df["Interest Cost (est.)"]=df["Interest Cost (est.)"].apply(lambda x:f"₹{x:,.0f}")
         st.dataframe(df, use_container_width=True, hide_index=True)
+        total_interest = sum(e.get("interest_cost",0) for e in emis)
+        if total_interest > 0:
+            st.markdown(f'<div class="ab a">💸 Estimated total interest you will pay across all loans: <b>₹{total_interest:,.0f}</b>. Prepaying high-rate loans first saves this amount.</div>', unsafe_allow_html=True)
 
     if total_exp > ti * .7: st.markdown('<div class="ab r">🚨 Expenses are 70%+ of income. This is critical — immediate budget review needed.</div>', unsafe_allow_html=True)
     elif total_exp > ti * .5: st.markdown('<div class="ab a">⚠️ Expenses above 50% of income. Trimming ₹2,000/month = ₹24K/year saved.</div>', unsafe_allow_html=True)
@@ -1163,8 +1294,19 @@ elif page == "📈  Investments & EPF":
     with c2:
         st.markdown("**🏛️ Debt / Guaranteed**")
         s.ppf    = st.number_input("PPF (₹/month)  ✅ 80C + Tax-free", 0, step=500, value=s.ppf, format="%d", help="7.1% p.a. tax-free; max ₹1.5L/year")
-        s.nps    = st.number_input("NPS (₹/month)  ✅ 80CCD extra ₹50K", 0, step=500, value=s.nps, format="%d")
-        s.other_inv=st.number_input("Other Investments (₹/month)", 0, step=500, value=s.other_inv, format="%d")
+        s.nps    = st.number_input("NPS (₹/month)  ✅ 80CCD extra ₹50K", 0, step=500, value=s.get("nps",0), format="%d")
+        s.other_inv=st.number_input("Other Investments (₹/month)", 0, step=500, value=s.get("other_inv",0), format="%d")
+    st.markdown('<p class="stl">📦 Existing Investment Corpus (what you already have)</p>', unsafe_allow_html=True)
+    ex1, ex2, ex3 = st.columns(3)
+    with ex1:
+        s.existing_stocks = st.number_input("Existing Stocks Portfolio (₹)", 0, step=5000, value=s.get("existing_stocks",0), format="%d", help="Current market value of all direct stock holdings")
+    with ex2:
+        s.existing_ppf = st.number_input("Existing PPF Balance (₹)", 0, step=5000, value=s.get("existing_ppf",0), format="%d", help="Current PPF account balance")
+    with ex3:
+        s.existing_nps = st.number_input("Existing NPS Corpus (₹)", 0, step=5000, value=s.get("existing_nps",0), format="%d", help="Current NPS account balance")
+    if any([s.get("existing_stocks"), s.get("existing_ppf"), s.get("existing_nps")]):
+        total_existing = s.get("existing_stocks",0) + s.get("existing_ppf",0) + s.get("existing_nps",0)
+        st.markdown(f'<div class="ab g">📊 Your existing investment corpus: <b>{fmt(total_existing)}</b> — this will be included in your retirement projection.</div>', unsafe_allow_html=True)
 
     # ── EPF ──────────────────────────────────────────────────────────────────
     st.markdown('<p class="stl">🏛️ EPF — Employee Provident Fund</p>', unsafe_allow_html=True)
@@ -1327,20 +1469,31 @@ elif page == "🏦  Savings & Assets":
 
     # ── Bank Strategy ─────────────────────────────────────────────────────────
     st.markdown('<p class="stl">🏦 Optimal Bank Account Structure</p>', unsafe_allow_html=True)
-    if s.banks < 3:
-        st.markdown(f'<div class="ab a">⚠️ You have only <b>{s.banks} account(s)</b>. For financial discipline and clarity, we recommend <b>3–4 purpose-driven accounts</b>. See the structure below.</div>', unsafe_allow_html=True)
-    elif s.banks == 3 or s.banks == 4:
-        st.markdown(f'<div class="ab g">✅ {s.banks} accounts — the sweet spot! Make sure each has a clear purpose (see below). Set up auto-transfers on salary date.</div>', unsafe_allow_html=True)
+    s.has_credit_card = st.toggle("Do you have a Credit Card?", value=s.get("has_credit_card", False),
+                                   help="If yes, your credit card bill account becomes your 4th account need")
+    ideal_banks = 4 if s.get("has_credit_card") else 3
+    if s.get("banks",1) < ideal_banks:
+        st.markdown(f'<div class="ab a">⚠️ You have <b>{s.get("banks",1)} account(s)</b> but need <b>{ideal_banks}</b> for {"a credit card user" if s.get("has_credit_card") else "optimal financial structure"}. See the recommended structure below.</div>', unsafe_allow_html=True)
+    elif s.get("banks",1) == ideal_banks:
+        st.markdown(f'<div class="ab g">✅ {s.get("banks",1)} accounts — perfect structure{"for a credit card user" if s.get("has_credit_card") else ""}! Set up auto-transfers on salary credit date.</div>', unsafe_allow_html=True)
     else:
-        st.markdown(f'<div class="ab a">⚠️ {s.banks} accounts may create complexity and idle balances. Consolidate to 3–4 purpose-driven accounts.</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="ab a">⚠️ {s.get("banks",1)} accounts may create idle balances. Aim for {ideal_banks} purpose-driven accounts.</div>', unsafe_allow_html=True)
 
-    bc = st.columns(4)
-    slots = [
-        ("n","Account 1","💼 Salary Account","All income lands here. Keep max 1 month of expenses. Transfer surplus immediately on salary day."),
-        ("g","Account 2","🛡️ Emergency Fund","High-interest savings (IDFC, AU Bank ~7%+). Target 6 months of expenses. Touch only for genuine emergencies."),
-        ("p","Account 3","📊 Investment Account","All SIP/stock debits go from here. Transfer from Account 1 on salary day. Never mix with expenses."),
-        ("a","Account 4","💸 Expenses Account","Fixed monthly budget transferred here. Only debit card spending from this account. Prevents lifestyle creep."),
-    ]
+    if s.get("has_credit_card"):
+        bc = st.columns(4)
+        slots = [
+            ("n","Account 1","💸 Daily Expenses","Variable monthly spending — groceries, fuel, eating out. Amount varies each month, keep only what you need here."),
+            ("g","Account 2","💼 Salary Account","Fixed outflows — Rent/EMIs/SIP auto-debited here on salary day. Never touch for variable spending."),
+            ("p","Account 3","🛡️ Savings Account","Emergency fund + FD ladder. 6 months of expenses. High-interest savings bank (IDFC, AU, SBI)."),
+            ("a","Account 4","💳 Credit Card Bill","Keep funds here to pay your credit card full statement. Never pay minimum due — always pay full."),
+        ]
+    else:
+        bc = st.columns(3)
+        slots = [
+            ("n","Account 1","💸 Daily Expenses","Variable monthly spending. Transfer a fixed budget here at start of month. When it's empty — stop spending."),
+            ("g","Account 2","💼 Salary Account","Fixed outflows — Rent, EMIs, SIP all auto-debit from here. Protected from lifestyle spending."),
+            ("p","Account 3","🛡️ Savings Account","Emergency fund (6 months expenses) + FD. High-interest savings (IDFC, AU, SBI). Touch only for emergencies."),
+        ]
     for col, (cls, no, name, desc) in zip(bc, slots):
         with col:
             st.markdown(f'<div class="bslot {cls}"><div class="bslot-no">{no}</div><div class="bslot-name">{name}</div><div class="bslot-desc">{desc}</div></div>', unsafe_allow_html=True)
@@ -1455,169 +1608,7 @@ elif page == "📊  Dashboard & Report":
       </div>
     </div>""", unsafe_allow_html=True)
 
-    # ── KPI Row ───────────────────────────────────────────────────────────────
-    k = st.columns(6)
-    with k[0]: st.markdown(f'<div class="mc"><div class="mc-lbl">Monthly Income</div><div class="mc-val">{fmt(ti)}</div></div>', unsafe_allow_html=True)
-    with k[1]:
-        ec = "r" if t["total_exp"]>ti*.7 else "a" if t["total_exp"]>ti*.5 else ""
-        st.markdown(f'<div class="mc {ec}"><div class="mc-lbl">Total Expenses</div><div class="mc-val">{fmt(t["total_exp"])}</div><div class="mc-sub">{pct(t["total_exp"],ti)}</div></div>', unsafe_allow_html=True)
-    with k[2]: st.markdown(f'<div class="mc t"><div class="mc-lbl">Investments</div><div class="mc-val">{fmt(t["total_inv"])}</div><div class="mc-sub">{pct(t["total_inv"],ti)}</div></div>', unsafe_allow_html=True)
-    with k[3]:
-        sc2 = "r" if t["surplus"]<0 else "a" if t["surplus"]<ti*.05 else ""
-        st.markdown(f'<div class="mc {sc2}"><div class="mc-lbl">Monthly Surplus</div><div class="mc-val">{fmt(t["surplus"])}</div></div>', unsafe_allow_html=True)
-    with k[4]: st.markdown(f'<div class="mc b"><div class="mc-lbl">Net Worth</div><div class="mc-val">{fmt(t["net_worth"])}</div></div>', unsafe_allow_html=True)
-    with k[5]: st.markdown(f'<div class="mc p"><div class="mc-lbl">Health Score</div><div class="mc-val">{s_ico} {score}/100</div><div class="mc-sub">{s_lbl}</div></div>', unsafe_allow_html=True)
-
-    st.markdown("")
-
-    # ── Charts Row ────────────────────────────────────────────────────────────
-    ca, cb = st.columns(2)
-    with ca:
-        st.markdown("**💸 Monthly Money Flow**")
-        lbs=["Rent","Groceries","Utilities","Transport","EMIs","Dining","Entertainment","Education","Other","SIP/MF","Stocks","ELSS","PPF","NPS","EPF","Other Inv","Insurance"]
-        vs =[s.rent,s.groceries,s.utilities,s.transport,total_emi,s.dining,s.entertainment,s.education,s.other_exp,s.sip,s.stocks,s.elss,s.ppf,s.nps,s.epf_emp_mo,s.other_inv,s.ins_prem]
-        cs =["#ef4444","#f97316","#eab308","#84cc16","#dc2626","#fb923c","#c084fc","#38bdf8","#94a3b8","#34d399","#10b981","#059669","#0d9488","#0891b2","#6366f1","#8b5cf6","#f43f5e"]
-        nz = [(l,v,c) for l,v,c in zip(lbs,vs,cs) if v>0]
-        if nz:
-            fig1 = go.Figure(go.Pie(
-                labels=[x[0] for x in nz], values=[x[1] for x in nz],
-                marker_colors=[x[2] for x in nz], hole=.48, textinfo="percent",
-                hovertemplate="<b>%{label}</b><br>₹%{value:,.0f}<extra></extra>"))
-            fig1.update_layout(height=320, margin=dict(l=0,r=0,t=10,b=0),
-                               paper_bgcolor="rgba(0,0,0,0)", showlegend=True,
-                               legend=dict(font=dict(size=9), orientation="v"))
-            st.plotly_chart(fig1, use_container_width=True)
-
-    with cb:
-        st.markdown("**🏛️ Asset Portfolio**")
-        al=["Cash/Savings","Fixed Deposits","Gold","Mutual Funds","Real Estate"]
-        av=[s.cash, s.fd, gold_val, s.mf, s.realty]
-        ac2=["#60a5fa","#34d399","#fbbf24","#a78bfa","#f87171"]
-        nza=[(l,v,c) for l,v,c in zip(al,av,ac2) if v>0]
-        if nza:
-            fig2 = go.Figure(go.Bar(
-                x=[x[1] for x in nza], y=[x[0] for x in nza], orientation="h",
-                marker_color=[x[2] for x in nza],
-                text=[fmt(x[1]) for x in nza], textposition="auto",
-                hovertemplate="<b>%{y}</b><br>₹%{x:,.0f}<extra></extra>"))
-            fig2.update_layout(height=320, margin=dict(l=0,r=0,t=10,b=0),
-                               paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                               xaxis=dict(gridcolor="#f1f5f9",showticklabels=False),
-                               yaxis=dict(gridcolor="#f1f5f9"))
-            st.plotly_chart(fig2, use_container_width=True)
-        else:
-            st.info("Fill in your assets on the Savings & Assets page.")
-
-    # ── Score Breakdown + 50/30/20 ────────────────────────────────────────────
-    cd, ce = st.columns([1,2])
-    with cd:
-        st.markdown("**🎯 Health Score Breakdown**")
-        for cat, got, mx, note in sb:
-            pct_bar = got/mx if mx else 0
-            bar_color = "#0e6b4a" if pct_bar==1 else "#f59e0b" if pct_bar>.5 else "#ef4444"
-            st.markdown(f"""
-            <div class="sbar">
-              <div class="sbar-hd"><span>{cat}</span><span>{got}/{mx}</span></div>
-              <div class="sbar-bg"><div class="sbar-fill" style="width:{int(pct_bar*100)}%;background:{bar_color}"></div></div>
-              <div style="font-size:.7rem;color:#64748b;margin-top:2px">{note}</div>
-            </div>""", unsafe_allow_html=True)
-
-    with ce:
-        st.markdown("**📊 50/30/20 Budget Benchmark**")
-        if ti > 0:
-            needs = s.rent+s.groceries+s.utilities+s.transport+total_emi+s.ins_prem
-            wants = s.dining+s.entertainment+s.education+s.other_exp
-            savs  = t["total_inv"] + max(0, t["surplus"])
-            cats  = ["Needs (Essentials)","Wants (Lifestyle)","Savings & Investments"]
-            actual= [needs, wants, savs]
-            ideals= [ti*.5, ti*.3, ti*.2]
-            fig3 = go.Figure()
-            fig3.add_trace(go.Bar(name="Your Budget", x=cats, y=actual,
-                                   marker_color=["#f87171","#fbbf24","#34d399"],
-                                   text=[fmt(v) for v in actual], textposition="outside"))
-            fig3.add_trace(go.Bar(name="Ideal (50/30/20)", x=cats, y=ideals,
-                                   marker_color=["rgba(248,113,113,.25)","rgba(251,191,36,.25)","rgba(52,211,153,.25)"],
-                                   text=[fmt(v) for v in ideals], textposition="outside"))
-            fig3.update_layout(barmode="group", height=290, margin=dict(l=0,r=0,t=10,b=0),
-                               paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                               xaxis=dict(gridcolor="#f1f5f9"),
-                               yaxis=dict(gridcolor="#f1f5f9",title="₹"),
-                               legend=dict(orientation="h",y=1.1))
-            st.plotly_chart(fig3, use_container_width=True)
-
-    # ── Retirement ────────────────────────────────────────────────────────────
-    st.markdown('<p class="stl">🏁 Retirement Projection</p>', unsafe_allow_html=True)
-    ytr   = max(0, s.ret_age - s.age)
-    rr    = s.ret_ret
-    sip_c = sipfv(s.sip+s.stocks+s.elss, rr, ytr)
-    ppf_c = sipfv(s.ppf, 7.1, ytr)
-    nps_c = sipfv(s.nps, 10.0, ytr)
-    mf_c  = s.mf * ((1+rr/100)**ytr)
-    tot_c = sip_c + ppf_c + nps_c + mf_c + s.epf_proj
-    fut_e = t["total_exp"]*.8*((1+s.inflation/100)**ytr)
-    need  = fut_e*12*25; gap = tot_c - need
-    rc = st.columns(4)
-    with rc[0]: st.markdown(f'<div class="mc"><div class="mc-lbl">Years to Retire</div><div class="mc-val">{ytr}</div><div class="mc-sub">at age {s.ret_age}</div></div>', unsafe_allow_html=True)
-    with rc[1]: st.markdown(f'<div class="mc t"><div class="mc-lbl">Projected Corpus</div><div class="mc-val">{fmt(tot_c)}</div></div>', unsafe_allow_html=True)
-    with rc[2]: st.markdown(f'<div class="mc a"><div class="mc-lbl">Corpus Needed</div><div class="mc-val">{fmt(need)}</div><div class="mc-sub">25× annual expenses</div></div>', unsafe_allow_html=True)
-    with rc[3]:
-        gc = "" if gap>=0 else "r"
-        st.markdown(f'<div class="mc {gc}"><div class="mc-lbl">{"Surplus ✅" if gap>=0 else "Shortfall ⚠️"}</div><div class="mc-val">{fmt(abs(gap))}</div></div>', unsafe_allow_html=True)
-    if gap < 0:
-        extra = abs(gap) / (sipfv(1, rr, ytr) or 1)
-        st.markdown(f'<div class="ab a">📈 To close the gap: invest an additional <b>{fmt(extra)}/month</b> in equity SIP starting today. Time is your biggest asset.</div>', unsafe_allow_html=True)
-
-    # ── Insights ──────────────────────────────────────────────────────────────
-    st.markdown('<p class="stl">📋 Personalised Insights & Action Items</p>', unsafe_allow_html=True)
-    for msg in ins:  st.markdown(f'<div class="ab g">{msg}</div>', unsafe_allow_html=True)
-    for msg in warn: st.markdown(f'<div class="ab a">{msg}</div>', unsafe_allow_html=True)
-    for msg in dng:  st.markdown(f'<div class="ab r">{msg}</div>', unsafe_allow_html=True)
-
-    # ── Net Worth Statement ───────────────────────────────────────────────────
-    st.markdown('<p class="stl">📦 Net Worth Statement</p>', unsafe_allow_html=True)
-    nw_df = pd.DataFrame({
-        "Category": ["Cash & Savings","Fixed Deposits","Gold","Mutual Funds","Real Estate","EPF (Projected)","— TOTAL ASSETS —","Outstanding Loans","— NET WORTH —"],
-        "Amount":   [fmtr(s.cash), fmtr(s.fd), fmtr(gold_val), fmtr(s.mf), fmtr(s.realty),
-                      fmt(s.epf_proj), fmt(t["ta"]+s.epf_proj), f"-{fmtr(t['total_outst'])}", fmt(t["net_worth"]+s.epf_proj)],
-    })
-    st.dataframe(nw_df, use_container_width=True, hide_index=True)
-
-    # ── Health Score Reveal + Payment Gate ───────────────────────────────────
-    st.markdown("---")
-    st.markdown('<p class="stl">🎯 Your Financial Health Score</p>', unsafe_allow_html=True)
-
-    # Big score card — always visible, free
-    sc_color  = "#0e6b4a" if score>=75 else "#f59e0b" if score>=55 else "#f97316" if score>=35 else "#ef4444"
-    sc_bg     = "#f0fdf4" if score>=75 else "#fffbeb" if score>=55 else "#fff7ed" if score>=35 else "#fef2f2"
-    sc_border = "#86efac" if score>=75 else "#fcd34d" if score>=55 else "#fdba74" if score>=35 else "#fca5a5"
-    s_ico2, s_lbl2 = hbadge(score)
-
-    st.markdown(f"""
-    <div style="background:{sc_bg};border:2px solid {sc_border};border-radius:20px;padding:32px 36px;text-align:center;margin:12px 0">
-      <div style="font-size:4rem;line-height:1;margin-bottom:8px">{s_ico2}</div>
-      <div style="font-family:'DM Serif Display',serif;font-size:3.2rem;font-weight:700;color:{sc_color};line-height:1">{score}</div>
-      <div style="font-size:1rem;font-weight:600;color:{sc_color};letter-spacing:.04em;margin-top:4px">out of 100 &nbsp;·&nbsp; {s_lbl2}</div>
-      <div style="font-size:.85rem;color:#64748b;margin-top:12px;line-height:1.6;max-width:480px;margin-left:auto;margin-right:auto">
-        This score reflects your investment rate, expense control, insurance cover, emergency fund, debt load, and monthly surplus.
-        {"🎉 You're in great financial shape! Keep compounding." if score>=75 else
-         "💪 Good foundation. A few tweaks can push you to Excellent." if score>=55 else
-         "⚠️ Several gaps need attention. Your full report shows exactly what to fix." if score>=35 else
-         "🚨 Significant financial gaps detected. Your report contains a prioritised action plan."}
-      </div>
-    </div>""", unsafe_allow_html=True)
-
-    # Score breakdown bars (visible free)
-    st.markdown("**Score Breakdown:**")
-    for cat, got, mx, note in sb:
-        pb  = got/mx if mx else 0
-        bc  = "#0e6b4a" if pb==1 else "#f59e0b" if pb>.5 else "#ef4444"
-        st.markdown(f"""<div class="sbar">
-          <div class="sbar-hd"><span>{cat}</span><span style="color:{bc};font-weight:600">{got}/{mx}</span></div>
-          <div class="sbar-bg"><div class="sbar-fill" style="width:{int(pb*100)}%;background:{bc}"></div></div>
-          <div style="font-size:.7rem;color:#64748b;margin-top:2px">{note}</div>
-        </div>""", unsafe_allow_html=True)
-
-    # ── Payment Gate ──────────────────────────────────────────────────────────
+    # ── Health Score — ONLY visible section (free) ───────────────────────────
     st.markdown('<p class="stl">🎯 Your Financial Health Score</p>', unsafe_allow_html=True)
 
     # Big score card — always visible, free
@@ -1734,6 +1725,9 @@ elif page == "📊  Dashboard & Report":
                     try:
                         saved_name = save_report_to_disk(pdf_data, {
                             "name":        s.name or "Unknown",
+                            "full_name":   s.name or st.session_state.get("auth_full_name",""),
+                            "username":    st.session_state.get("auth_user",""),
+                            "email":       st.session_state.get("auth_email",""),
                             "age":         s.age,
                             "city":        s.city,
                             "salary":      s.salary,
@@ -1751,6 +1745,12 @@ elif page == "📊  Dashboard & Report":
                             f"_{(s.name or 'Client').replace(' ','_')}_ss.{ext}"
                         )
                         (REPORTS_DIR / ss_fname).write_bytes(screenshot.getvalue())
+                        # patch screenshot filename back into submissions log
+                        try:
+                            subs = json.loads(SUBS_FILE.read_text()) if SUBS_FILE.exists() else []
+                            if subs: subs[-1]["screenshot_file"] = ss_fname
+                            SUBS_FILE.write_text(json.dumps(subs, indent=2))
+                        except Exception: pass
                         st.session_state.saved_name = saved_name
                     except Exception:
                         st.session_state.saved_name = "cloud-mode (no local disk)"
@@ -1763,25 +1763,13 @@ elif page == "📊  Dashboard & Report":
                         f"Please WhatsApp +91 {PAYMENT['whatsapp']} directly."
                     )
 
-    # ── Download button: always rendered if pdf_ready (survives reruns) ───────
-    if st.session_state.get("pdf_ready") and st.session_state.get("pdf_bytes"):
+    # ── No download button for users — admin downloads from portal ─────────────
+    if st.session_state.get("pdf_ready"):
         st.success(
-            f"🎉 Report ready! Download below. "
-            f"We will also send it to you on WhatsApp +91 {PAYMENT['whatsapp']} shortly."
+            f"✅ Payment confirmed! Your report has been saved. "
+            f"You will receive it on WhatsApp +91 {PAYMENT['whatsapp']} within 2 hours."
         )
-        st.download_button(
-            label="⬇️  Download Your Financial Report (PDF)",
-            data=st.session_state.pdf_bytes,
-            file_name=st.session_state.pdf_filename,
-            mime="application/pdf",
-            use_container_width=True,
-        )
-        saved = st.session_state.get("saved_name","")
-        if saved and saved != "cloud-mode (no local disk)":
-            st.markdown(
-                f'<div class="ab g">Report saved on advisor system as: <code>{saved}</code></div>',
-                unsafe_allow_html=True
-            )
+        st.markdown('<div class="ab g">📋 Our advisor will review your payment screenshot and send your personalised PDF report to your WhatsApp number shortly. <br><b>No action needed from your side.</b></div>', unsafe_allow_html=True)
 
     elif screenshot is None:
         # Locked placeholder — no screenshot uploaded yet
@@ -1795,7 +1783,6 @@ elif page == "📊  Dashboard & Report":
           </div>
         </div>""", unsafe_allow_html=True)
 
-        st.markdown("---")
         st.markdown("---")
     st.caption("FinSight is a financial planning tool. All projections are indicative. Consult a qualified financial professional before making investment decisions.")
     nav(next_label="Talk to an Advisor →")
@@ -1847,9 +1834,7 @@ elif page == "🤝  Consult an Advisor":
     ct = st.columns(4)
     contacts = [
         ("📱","Phone / WhatsApp",ADVISOR["phone"],"Call or WhatsApp — free 15-min discovery call"),
-        ("📱","Phone / WhatsApp",ADVISOR["phone"],"Call or WhatsApp — free 15-min discovery call"),
         ("📧","Email",ADVISOR["email"],"Queries, plans & documents"),
-        ("🌐","Website",ADVISOR["website"],"Blog, resources & booking"),
         ("🌐","Website",ADVISOR["website"],"Blog, resources & booking"),
         ("📍","Location",ADVISOR["address"],"In-person by appointment"),
     ]
@@ -1898,5 +1883,150 @@ elif page == "🤝  Consult an Advisor":
         <br><b>{ADVISOR['name']}</b> | {ADVISOR['title']}
       </p>
     </div>""", unsafe_allow_html=True)
+
+    nav(show_next=False)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PAGE 7 — MY PROFILE
+# ══════════════════════════════════════════════════════════════════════════════
+elif page == "👤  My Profile":
+    s = st.session_state
+    st.markdown("""<div class="pg-banner">
+      <div class="pg-banner-left"><h2>👤 My Profile</h2>
+        <p>Manage your personal details, security settings and account information.</p></div>
+      <div class="pg-banner-right"><div class="pg-step-no">👤</div></div>
+    </div>""", unsafe_allow_html=True)
+
+    uname   = s.get("auth_user","")
+    u_data  = get_user(uname)
+
+    if not u_data:
+        st.error("Could not load profile. Please log out and log in again.")
+    else:
+        # ── Profile summary card ──────────────────────────────────────────────
+        pc1, pc2 = st.columns([1, 2])
+        with pc1:
+            initials = "".join([n[0].upper() for n in u_data.get("full_name","U").split()[:2]])
+            st.markdown(f"""
+            <div style="background:linear-gradient(135deg,#0f2d52,#0e6b4a);border-radius:50%;
+                        width:90px;height:90px;display:flex;align-items:center;justify-content:center;
+                        font-size:2rem;font-weight:700;color:white;margin:0 auto 12px;letter-spacing:2px">
+              {initials}
+            </div>
+            <div style="text-align:center;font-weight:600;font-size:1.05rem;color:#0f172a">{u_data.get("full_name","")}</div>
+            <div style="text-align:center;font-size:.8rem;color:#64748b;margin-top:2px">`{uname}`</div>
+            <div style="text-align:center;font-size:.75rem;color:#94a3b8;margin-top:4px">
+              Joined {u_data.get("created_at","")[:10]}</div>
+            """, unsafe_allow_html=True)
+        with pc2:
+            psc = st.columns(2)
+            with psc[0]:
+                st.markdown(f'<div class="mc"><div class="mc-lbl">Email</div><div class="mc-val" style="font-size:1rem">{u_data.get("email","—")}</div></div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="mc b"><div class="mc-lbl">Mobile</div><div class="mc-val" style="font-size:1rem">+91 {u_data.get("mobile","—")}</div></div>', unsafe_allow_html=True)
+            with psc[1]:
+                st.markdown(f'<div class="mc p"><div class="mc-lbl">Date of Birth</div><div class="mc-val" style="font-size:1rem">{u_data.get("dob","—")}</div></div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="mc t"><div class="mc-lbl">Age</div><div class="mc-val" style="font-size:1rem">{u_data.get("age","—")} years</div></div>', unsafe_allow_html=True)
+
+        st.markdown("---")
+
+        # ── Edit profile ──────────────────────────────────────────────────────
+        st.markdown('<p class="stl">✏️ Edit Profile Information</p>', unsafe_allow_html=True)
+        ep1, ep2 = st.columns(2)
+        with ep1:
+            new_name  = st.text_input("Full Name", value=u_data.get("full_name",""), key="ep_name")
+            new_email = st.text_input("Email Address", value=u_data.get("email",""), key="ep_email")
+            new_mob   = st.text_input("Mobile Number (10 digits)", value=u_data.get("mobile",""), key="ep_mob")
+        with ep2:
+            try:
+                cur_dob = datetime.strptime(u_data.get("dob","1995-01-01"), "%Y-%m-%d").date()
+            except Exception:
+                cur_dob = date(1995,1,1)
+            new_dob   = st.date_input("Date of Birth", value=cur_dob, key="ep_dob",
+                                       min_value=date(1950,1,1), max_value=date.today())
+            st.markdown("<br>", unsafe_allow_html=True)
+            if st.button("💾 Save Profile Changes", type="primary", use_container_width=True, key="btn_save_profile"):
+                ok, msg = update_profile(uname, {
+                    "full_name": new_name,
+                    "email":     new_email,
+                    "mobile":    new_mob,
+                    "dob":       str(new_dob),
+                })
+                if ok:
+                    st.success(f"✅ {msg}")
+                    # Update session
+                    st.session_state.auth_full_name = new_name or s.auth_full_name
+                    st.session_state.auth_email     = new_email or s.auth_email
+                    st.session_state.auth_mobile    = new_mob
+                    st.session_state.auth_dob       = str(new_dob)
+                    st.rerun()
+                else:
+                    st.error(f"❌ {msg}")
+
+        # ── Change Password ───────────────────────────────────────────────────
+        st.markdown('<p class="stl">🔒 Change Password</p>', unsafe_allow_html=True)
+        pp1, pp2 = st.columns(2)
+        with pp1:
+            cur_pw  = st.text_input("Current Password", type="password", key="ep_curpw")
+            new_pw  = st.text_input("New Password (min 6 chars)", type="password", key="ep_newpw")
+            new_pw2 = st.text_input("Confirm New Password", type="password", key="ep_newpw2")
+        with pp2:
+            st.markdown("<br><br>", unsafe_allow_html=True)
+            if st.button("🔐 Change Password", use_container_width=True, key="btn_change_pw"):
+                from auth import check_pw
+                if not check_pw(cur_pw, u_data.get("password","")):
+                    st.error("❌ Current password is incorrect.")
+                elif new_pw != new_pw2:
+                    st.error("❌ New passwords do not match.")
+                elif len(new_pw) < 6:
+                    st.error("❌ Password must be at least 6 characters.")
+                else:
+                    ok, msg = update_profile(uname, {"new_password": new_pw})
+                    if ok: st.success(f"✅ {msg}")
+                    else: st.error(f"❌ {msg}")
+
+        # ── OTP-verify new mobile ─────────────────────────────────────────────
+        st.markdown('<p class="stl">📱 Verify & Change Mobile Number</p>', unsafe_allow_html=True)
+        st.caption("To change your mobile number, verify the new number with OTP first.")
+        vm1, vm2 = st.columns(2)
+        with vm1:
+            new_mobile_verify = st.text_input("New Mobile Number", key="ep_newmob", placeholder="10-digit number")
+        with vm2:
+            st.markdown("<br>", unsafe_allow_html=True)
+            if st.button("📲 Send OTP to new number", use_container_width=True, key="btn_mob_otp"):
+                m = new_mobile_verify.strip()
+                if not m.isdigit() or len(m) != 10:
+                    st.error("❌ Enter a valid 10-digit number.")
+                else:
+                    otp = generate_otp(f"mob_change_{m}")
+                    send_otp_sms(m, otp)
+                    st.session_state["mob_change_pending"] = m
+                    st.info(f"📱 OTP sent to +91 {m}. (Demo: **{otp}**)")
+        if s.get("mob_change_pending"):
+            mc1, mc2 = st.columns(2)
+            with mc1:
+                mob_otp = st.text_input("Enter OTP", key="ep_mobotp", max_chars=6)
+            with mc2:
+                st.markdown("<br>", unsafe_allow_html=True)
+                if st.button("✅ Verify & Update Mobile", use_container_width=True, key="btn_verify_mob_change"):
+                    ok, msg = verify_otp(f"mob_change_{s.mob_change_pending}", mob_otp)
+                    if ok:
+                        ok2, msg2 = update_profile(uname, {"mobile": s.mob_change_pending})
+                        if ok2:
+                            st.success(f"✅ Mobile updated to +91 {s.mob_change_pending}")
+                            st.session_state.auth_mobile = s.mob_change_pending
+                            del st.session_state["mob_change_pending"]
+                            st.rerun()
+                        else: st.error(f"❌ {msg2}")
+                    else: st.error(f"❌ {msg}")
+
+        # ── Reports history ───────────────────────────────────────────────────
+        reports = u_data.get("reports",[])
+        if reports:
+            st.markdown('<p class="stl">📄 Your Report History</p>', unsafe_allow_html=True)
+            for r in reversed(reports):
+                rtype = "🔵 Auto-saved" if r.get("auto_save") else "💰 Paid report"
+                st.markdown(f"- {rtype} · {r.get('saved_at','')[:16].replace('_',' ')} · Score: **{r.get('score','—')}/100** · Net Worth: {fmt(r.get('net_worth',0))}")
+            st.markdown('<div class="ab b">📋 To download any report, please contact Yash Wankar on WhatsApp: <b>+91 90286 93456</b>.</div>', unsafe_allow_html=True)
 
     nav(show_next=False)

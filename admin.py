@@ -7,7 +7,7 @@ import streamlit as st
 import pandas as pd
 from pathlib import Path
 from datetime import datetime
-from auth import all_users
+from auth import all_users, delete_user, admin_update_user, get_user
 
 DATA_DIR    = Path(__file__).parent / "data"
 REPORTS_DIR = DATA_DIR / "reports"
@@ -183,11 +183,12 @@ def render():
     st.markdown("---")
 
     # ── TABS ─────────────────────────────────────────────────────────────────
-    tab1, tab2, tab3, tab4 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
         f"📋 All Reports  ({len(subs)})",
         f"💰 Paid Only  ({len(paid_subs)})",
         f"👥 Users  ({len(users)})",
         f"📁 PDF Files  ({len(pdfs)})",
+        "⚙️ Manage Users",
     ])
 
     # ═════════════════════════════════════════════════════════════════════════
@@ -471,3 +472,79 @@ def render():
                 with sc2:
                     if st.button("👁️ View", key=f"ss_view_{i}"):
                         st.image(str(ss), caption=ss.name, use_column_width=True)
+
+
+    # ═════════════════════════════════════════════════════════════════════════
+    # TAB 5 — MANAGE USERS (edit / delete)
+    # ═════════════════════════════════════════════════════════════════════════
+    with tab5:
+        st.markdown('<div class="astl">⚙️ Manage Users — Edit or Remove</div>', unsafe_allow_html=True)
+
+        users_fresh = all_users()
+        if not users_fresh:
+            st.markdown("""
+            <div class="empty-state"><div class="empty-icon">👥</div>
+              <div class="empty-title">No users yet</div></div>""", unsafe_allow_html=True)
+        else:
+            sel_manage = st.selectbox("Select user to manage:", ["— select —"] + list(users_fresh.keys()), key="t5_sel")
+            if sel_manage != "— select —":
+                u = users_fresh[sel_manage]
+                st.markdown(f"### Managing: **{u.get('full_name', sel_manage)}** (`{sel_manage}`)")
+
+                action = st.radio("Action:", ["✏️ Edit Info", "🔑 Reset Password", "🗑️ Delete User"],
+                                   horizontal=True, key="t5_action")
+
+                if action == "✏️ Edit Info":
+                    st.markdown("**Edit user details:**")
+                    ec1, ec2 = st.columns(2)
+                    with ec1:
+                        new_name  = st.text_input("Full Name",    value=u.get("full_name",""),  key="t5_name")
+                        new_email = st.text_input("Email",        value=u.get("email",""),       key="t5_email")
+                    with ec2:
+                        new_mob   = st.text_input("Mobile (10 digits)", value=u.get("mobile",""), key="t5_mob")
+                        new_dob   = st.text_input("Date of Birth (YYYY-MM-DD)", value=u.get("dob",""), key="t5_dob")
+                    if st.button("💾 Save Changes", type="primary", key="t5_save"):
+                        ok, msg = admin_update_user(sel_manage, {
+                            "full_name": new_name, "email": new_email,
+                            "mobile": new_mob, "dob": new_dob,
+                        })
+                        if ok: st.success(f"✅ {msg}")
+                        else:  st.error(f"❌ {msg}")
+
+                elif action == "🔑 Reset Password":
+                    st.markdown("**Set a new password for this user:**")
+                    new_pw  = st.text_input("New Password (min 6 chars)", type="password", key="t5_pw1")
+                    new_pw2 = st.text_input("Confirm Password", type="password", key="t5_pw2")
+                    if st.button("🔐 Reset Password", type="primary", key="t5_pw_btn"):
+                        if new_pw != new_pw2:
+                            st.error("❌ Passwords do not match.")
+                        elif len(new_pw) < 6:
+                            st.error("❌ Password must be at least 6 characters.")
+                        else:
+                            ok, msg = admin_update_user(sel_manage, {"new_password": new_pw})
+                            if ok: st.success(f"✅ Password reset for {sel_manage}.")
+                            else:  st.error(f"❌ {msg}")
+
+                elif action == "🗑️ Delete User":
+                    st.markdown(f"""
+                    <div style="background:#fef2f2;border:2px solid #fca5a5;border-radius:12px;
+                                padding:20px 24px;margin:12px 0">
+                      <div style="font-weight:700;color:#991b1b;font-size:1rem;margin-bottom:8px">
+                        ⚠️ Delete User: {u.get("full_name", sel_manage)}
+                      </div>
+                      <div style="color:#7f1d1d;font-size:.88rem">
+                        This will permanently delete the user account and all their data from users.json.
+                        PDF reports on disk will <b>not</b> be deleted. This action cannot be undone.
+                      </div>
+                    </div>""", unsafe_allow_html=True)
+                    confirm = st.text_input(f"Type the username `{sel_manage}` to confirm deletion:", key="t5_confirm")
+                    if st.button("🗑️ Permanently Delete User", key="t5_del_btn"):
+                        if confirm.strip() != sel_manage:
+                            st.error("❌ Username does not match. Deletion cancelled.")
+                        else:
+                            ok, msg = delete_user(sel_manage)
+                            if ok:
+                                st.success(f"✅ {msg}")
+                                st.rerun()
+                            else:
+                                st.error(f"❌ {msg}")
