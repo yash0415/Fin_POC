@@ -32,59 +32,98 @@ def _save_otps(otps):
     OTP_FILE.write_text(json.dumps(otps, indent=2))
 
 # ── OTP ───────────────────────────────────────────────────────────────────────
+# Uses Twilio Verify Service — no FROM number needed, just Service SID.
+# Falls back to local 6-digit OTP (shown on screen) if Twilio not configured.
+
+def _get_twilio_client():
+    """Returns (client, verify_service_sid) or (None, None) if not configured."""
+    try:
+        import streamlit as _st
+        from twilio.rest import Client
+        sid        = _st.secrets["TWILIO_SID"]
+        token      = _st.secrets["TWILIO_TOKEN"]
+        verify_sid = _st.secrets["TWILIO_VERIFY_SID"]
+        return Client(sid, token), verify_sid
+    except Exception:
+        return None, None
+
 def generate_otp(identifier):
-    otp = str(random.randint(100000, 999999))
+    """
+    With Twilio Verify: OTP is sent by Twilio — nothing stored locally.
+    Fallback: generate a local 6-digit OTP and store in otps.json.
+    Returns the OTP string (fallback only) or "twilio" (if Twilio handled it).
+    identifier = mobile number (10 digits) or "signup_<mobile>"
+    """
+    # Extract bare mobile from identifier (e.g. "signup_9876543210" → "9876543210")
+    mobile = identifier.replace("signup_", "").replace("mob_change_", "")
+
+    client, verify_sid = _get_twilio_client()
+    if client:
+        try:
+            client.verify.v2.services(verify_sid).verifications.create(
+                to=f"+91{mobile}", channel="sms"
+            )
+            # Store a marker so verify_otp knows Twilio is handling this
+            otps = _load_otps()
+            otps[identifier] = {"otp": "twilio", "created_at": datetime.now().isoformat()}
+            _save_otps(otps)
+            return "twilio"   # ← UI shows "OTP sent via SMS"
+        except Exception as e:
+            pass  # Fall through to local OTP
+
+    # ── Local fallback (demo mode) ─────────────────────────────────────────────
+    otp  = str(random.randint(100000, 999999))
     otps = _load_otps()
     otps[identifier] = {"otp": otp, "created_at": datetime.now().isoformat()}
     _save_otps(otps)
-    return otp
+    return otp   # ← UI shows this on screen in demo mode
 
 def verify_otp(identifier, entered):
-    otps = _load_otps()
+    """
+    With Twilio Verify: verify against Twilio's API.
+    Fallback: check locally stored OTP.
+    Returns (success, message).
+    """
+    mobile = identifier.replace("signup_", "").replace("mob_change_", "")
+    otps   = _load_otps()
+
     if identifier not in otps:
-        return False, "No OTP found. Request a new one."
+        return False, "No OTP found. Please request a new one."
+
     rec = otps[identifier]
+
+    # ── Twilio Verify path ─────────────────────────────────────────────────────
+    if rec.get("otp") == "twilio":
+        client, verify_sid = _get_twilio_client()
+        if client:
+            try:
+                result = client.verify.v2.services(verify_sid).verification_checks.create(
+                    to=f"+91{mobile}", code=entered.strip()
+                )
+                if result.status == "approved":
+                    del otps[identifier]; _save_otps(otps)
+                    return True, "OTP verified!"
+                else:
+                    return False, "Incorrect OTP. Please try again."
+            except Exception as e:
+                return False, f"Verification failed: {e}"
+        return False, "Twilio not configured. Please contact support."
+
+    # ── Local fallback path ────────────────────────────────────────────────────
     diff = (datetime.now() - datetime.fromisoformat(rec["created_at"])).total_seconds()
     if diff > 600:
-        return False, "OTP expired. Request a new one."
+        return False, "OTP expired. Please request a new one."
     if rec["otp"] != entered.strip():
-        return False, "Incorrect OTP."
+        return False, "Incorrect OTP. Please try again."
     del otps[identifier]; _save_otps(otps)
     return True, "OTP verified!"
 
 def send_otp_sms(mobile, otp):
     """
-    Send OTP via Twilio SMS.
-    Reads credentials from st.secrets (Streamlit Cloud) or env vars (local).
-
-    st.secrets (set in Streamlit Cloud → App Settings → Secrets):
-        TWILIO_SID   = "ACxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-        TWILIO_TOKEN = "your_auth_token"
-        TWILIO_FROM  = "+1XXXXXXXXXX"   ← your Twilio phone number
-
-    Returns: "sent" if SMS sent, or the OTP string in demo/fallback mode.
+    Only used in fallback/demo mode — Twilio Verify handles real SMS itself.
+    Returns: "twilio" if Twilio sent it, or the OTP string in demo mode.
     """
-    try:
-        import streamlit as _st
-        sid   = _st.secrets["TWILIO_SID"]
-        token = _st.secrets["TWILIO_TOKEN"]
-        from_ = _st.secrets["TWILIO_FROM"]
-        from twilio.rest import Client
-        Client(sid, token).messages.create(
-            body=f"Your FinSight OTP is: {otp}. Valid for 10 minutes. Do not share with anyone.",
-            from_=from_,
-            to=f"+91{mobile}"
-        )
-        return "sent"
-    except KeyError:
-        # Twilio secrets not configured — demo mode (OTP shown on screen)
-        return otp
-    except ImportError:
-        # twilio package not installed
-        return otp
-    except Exception as e:
-        # SMS failed but don't crash the app — return OTP for fallback display
-        return otp
+    return otp  # In Twilio Verify flow, generate_otp already sent the SMS
 
 # ── Password ──────────────────────────────────────────────────────────────────
 def hash_pw(plain):
