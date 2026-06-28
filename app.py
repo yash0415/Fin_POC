@@ -48,8 +48,8 @@ ADVISOR = {
 }
 
 # ── ADMIN CREDENTIALS (change these!) ────────────────────────────────────────
-ADMIN_USER = "yashwankar"
-ADMIN_PASS = "Yash@2025#FS"   # ← Your admin password
+ADMIN_USER = "admin"
+ADMIN_PASS = "Yash@2026"   # ← Your admin password
 
 PAGES = [
     "🏠  Profile & Income",
