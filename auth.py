@@ -1,4 +1,5 @@
 """
+Install: pip install twilio  (already in requirements.txt)
 auth.py v8 — FinSight Authentication & User Data
 Features: signup with mobile+DOB, OTP, login, finance data persistence,
           profile update, delete user, admin operations
@@ -52,9 +53,38 @@ def verify_otp(identifier, entered):
     return True, "OTP verified!"
 
 def send_otp_sms(mobile, otp):
-    # PLUG TWILIO / MSG91 HERE
-    # Demo: just return the OTP string so UI can show it
-    return otp
+    """
+    Send OTP via Twilio SMS.
+    Reads credentials from st.secrets (Streamlit Cloud) or env vars (local).
+
+    st.secrets (set in Streamlit Cloud → App Settings → Secrets):
+        TWILIO_SID   = "ACxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        TWILIO_TOKEN = "your_auth_token"
+        TWILIO_FROM  = "+1XXXXXXXXXX"   ← your Twilio phone number
+
+    Returns: "sent" if SMS sent, or the OTP string in demo/fallback mode.
+    """
+    try:
+        import streamlit as _st
+        sid   = _st.secrets["TWILIO_SID"]
+        token = _st.secrets["TWILIO_TOKEN"]
+        from_ = _st.secrets["TWILIO_FROM"]
+        from twilio.rest import Client
+        Client(sid, token).messages.create(
+            body=f"Your FinSight OTP is: {otp}. Valid for 10 minutes. Do not share with anyone.",
+            from_=from_,
+            to=f"+91{mobile}"
+        )
+        return "sent"
+    except KeyError:
+        # Twilio secrets not configured — demo mode (OTP shown on screen)
+        return otp
+    except ImportError:
+        # twilio package not installed
+        return otp
+    except Exception as e:
+        # SMS failed but don't crash the app — return OTP for fallback display
+        return otp
 
 # ── Password ──────────────────────────────────────────────────────────────────
 def hash_pw(plain):
