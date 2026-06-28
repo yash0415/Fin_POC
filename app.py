@@ -1032,101 +1032,114 @@ if not st.session_state.get("auth_logged_in", False):
                         else: st.info(f"📱 (Demo) New OTP: **{result}**")
 
     # ════════════════════════════════════════════════════════════════════════
-    # SIGNUP TAB
+    # SIGNUP TAB  — uses st.form so ALL field values are captured together
     # ════════════════════════════════════════════════════════════════════════
     with tab_signup:
         st.markdown("")
-        su_name  = st.text_input("Full Name *",                        key="su_name",  placeholder="e.g. Arjun Mehta")
-        su_email = st.text_input("Email Address *",                    key="su_email", placeholder="you@example.com")
-        su_mob   = st.text_input("Mobile Number * (10 digits, no +91)", key="su_mob",  placeholder="9876543210")
-        su_dob   = st.date_input("Date of Birth *", key="su_dob",
-                                  min_value=date(1950,1,1), max_value=date.today(),
-                                  value=date(1995,1,1))
-        su_user  = st.text_input("Choose Username *", key="su_user", placeholder="min 3 chars, no spaces")
-        su_pass  = st.text_input("Password *",         type="password", key="su_pass",  placeholder="min 6 characters")
-        su_pass2 = st.text_input("Confirm Password *", type="password", key="su_pass2")
-        st.markdown("")
 
-        # ── Step 1: Send OTP to verify mobile ────────────────────────────────
+        # ── STEP 1: Collect details + Send OTP ───────────────────────────────
         if not st.session_state.get("signup_otp_verified"):
-            if st.button("Send OTP & Verify Mobile →", type="primary",
-                         use_container_width=True, key="btn_signup_sendotp"):
-                # Read directly from session_state — guaranteed to have typed value
-                mob = st.session_state.get("su_mob", "").strip()
-                # Strip spaces, dashes, dots users might type
-                mob = mob.replace(" ", "").replace("-", "").replace("+91", "")
-                if not mob.isdigit() or len(mob) != 10:
-                    st.error(f"❌ Enter a valid 10-digit mobile number. Got: '{mob}'")
+
+            # st.form ensures every field value is captured before button fires
+            with st.form("signup_form_step1"):
+                f_name  = st.text_input("Full Name *",                         placeholder="e.g. Arjun Mehta")
+                f_email = st.text_input("Email Address *",                     placeholder="you@example.com")
+                f_mob   = st.text_input("Mobile Number * (10 digits, no +91)", placeholder="9876543210")
+                f_dob   = st.date_input("Date of Birth *",
+                                         min_value=date(1950,1,1),
+                                         max_value=date.today(),
+                                         value=date(1995,1,1))
+                f_user  = st.text_input("Choose Username *",  placeholder="min 3 chars, no spaces")
+                f_pass  = st.text_input("Password *",          type="password", placeholder="min 6 characters")
+                f_pass2 = st.text_input("Confirm Password *",  type="password")
+                send_btn = st.form_submit_button("📱 Send OTP to Verify Mobile →",
+                                                  type="primary", use_container_width=True)
+
+            if send_btn:
+                # Inside form submit — ALL field values are reliably available
+                mob = f_mob.strip().replace(" ","").replace("-","").replace("+91","")
+                if not f_name.strip():
+                    st.error("❌ Full name is required.")
+                elif not f_email.strip() or "@" not in f_email:
+                    st.error("❌ Enter a valid email address.")
+                elif not mob.isdigit() or len(mob) != 10:
+                    st.error(f"❌ Enter a valid 10-digit mobile number (digits only, no spaces).")
+                elif not f_user.strip() or len(f_user.strip()) < 3:
+                    st.error("❌ Username must be at least 3 characters.")
+                elif " " in f_user.strip():
+                    st.error("❌ Username cannot have spaces.")
+                elif len(f_pass) < 6:
+                    st.error("❌ Password must be at least 6 characters.")
+                elif f_pass != f_pass2:
+                    st.error("❌ Passwords do not match.")
                 else:
+                    # Save all details to session BEFORE sending OTP
+                    st.session_state.signup_data = {
+                        "name":  f_name.strip(),
+                        "email": f_email.strip(),
+                        "mob":   mob,
+                        "dob":   str(f_dob),
+                        "user":  f_user.strip().lower(),
+                        "pass":  f_pass,
+                    }
                     otp    = generate_otp(f"signup_{mob}")
                     result = send_otp_sms(mob, otp)
-                    # Store mobile in session so resend & create account can use it
-                    st.session_state.signup_mobile     = mob
                     st.session_state.signup_otp_sent   = True
                     st.session_state.signup_identifier = f"signup_{mob}"
                     if result == "twilio":
-                        st.info(f"📱 OTP sent to +91 {mob} via SMS. Enter it below.")
+                        st.info(f"📱 OTP sent to +91 {mob} via SMS.")
                     else:
-                        st.info(f"📱 Demo mode (Twilio not set up). Your OTP is: **{result}**")
-        else:
-            mob_verified = st.session_state.get("signup_mobile", st.session_state.get("su_mob",""))
-            st.markdown(f'<div style="background:#f0fdf4;border:1px solid #86efac;border-radius:8px;padding:8px 14px;font-size:.85rem;color:#15803d;margin:4px 0">✅ Mobile +91 {mob_verified} verified!</div>', unsafe_allow_html=True)
+                        st.info(f"📱 Demo mode — Twilio not configured. Your OTP is: **{result}**")
 
-        # ── Step 2: Enter OTP ─────────────────────────────────────────────────
+        # ── STEP 2: Enter OTP ─────────────────────────────────────────────────
         if st.session_state.get("signup_otp_sent") and not st.session_state.get("signup_otp_verified"):
-            su_otp = st.text_input("Enter 6-digit OTP", key="su_otp",
-                                    placeholder="______", max_chars=6)
-            oc1, oc2 = st.columns(2)
-            with oc1:
-                if st.button("✅ Verify OTP", type="primary",
-                              use_container_width=True, key="btn_verify_signup_otp"):
-                    entered_otp = st.session_state.get("su_otp", "").strip()
-                    ident       = st.session_state.get("signup_identifier", "")
-                    ok, msg     = verify_otp(ident, entered_otp)
-                    if ok:
-                        st.session_state.signup_otp_verified = True
-                        st.session_state.signup_otp_sent     = False
-                        st.success("✅ Mobile number verified!")
-                        st.rerun()
-                    else:
-                        st.error(f"❌ {msg}")
-            with oc2:
-                if st.button("🔄 Resend OTP", use_container_width=True, key="btn_resend_signup"):
-                    mob    = st.session_state.get("signup_mobile", "")
-                    otp    = generate_otp(f"signup_{mob}")
-                    result = send_otp_sms(mob, otp)
-                    if result == "twilio": st.info(f"📱 New OTP sent to +91 {mob}.")
-                    else: st.info(f"📱 (Demo) New OTP: **{result}**")
+            saved = st.session_state.get("signup_data", {})
+            mob   = saved.get("mob", "")
+            st.markdown(f'<div class="ab b">📱 OTP sent to <b>+91 {mob}</b>. Enter the 6-digit code below.</div>', unsafe_allow_html=True)
 
-        # ── Step 3: Create Account (only after OTP verified) ─────────────────
+            with st.form("signup_form_otp"):
+                entered_otp = st.text_input("Enter 6-digit OTP", placeholder="______", max_chars=6)
+                oc1, oc2   = st.columns(2)
+                with oc1: verify_btn = st.form_submit_button("✅ Verify OTP", type="primary", use_container_width=True)
+                with oc2: resend_btn = st.form_submit_button("🔄 Resend OTP", use_container_width=True)
+
+            if verify_btn:
+                ident   = st.session_state.get("signup_identifier", "")
+                ok, msg = verify_otp(ident, entered_otp.strip())
+                if ok:
+                    st.session_state.signup_otp_verified = True
+                    st.session_state.signup_otp_sent     = False
+                    st.success("✅ Mobile verified!")
+                    st.rerun()
+                else:
+                    st.error(f"❌ {msg}")
+
+            if resend_btn:
+                otp    = generate_otp(f"signup_{mob}")
+                result = send_otp_sms(mob, otp)
+                if result == "twilio": st.info(f"📱 New OTP sent to +91 {mob}.")
+                else: st.info(f"📱 (Demo) New OTP: **{result}**")
+
+        # ── STEP 3: Create Account ────────────────────────────────────────────
         if st.session_state.get("signup_otp_verified"):
+            saved = st.session_state.get("signup_data", {})
+            mob   = saved.get("mob","")
+            st.markdown(f'<div class="ab g">✅ Mobile +91 {mob} verified! Click below to create your account.</div>', unsafe_allow_html=True)
+
             if st.button("🚀 Create Account →", type="primary",
                           use_container_width=True, key="btn_create_account"):
-                # Read all values fresh from session_state
-                s_name  = st.session_state.get("su_name",  "").strip()
-                s_email = st.session_state.get("su_email", "").strip()
-                s_mob   = st.session_state.get("signup_mobile",
-                          st.session_state.get("su_mob","")).strip()
-                s_user  = st.session_state.get("su_user",  "").strip()
-                s_pass  = st.session_state.get("su_pass",  "")
-                s_pass2 = st.session_state.get("su_pass2", "")
-                s_dob   = str(st.session_state.get("su_dob", date(1995,1,1)))
-                if s_pass != s_pass2:
-                    st.error("❌ Passwords do not match.")
-                elif not s_name:
-                    st.error("❌ Full name is required.")
-                elif not s_user:
-                    st.error("❌ Username is required.")
+                ok, msg = signup(
+                    saved.get("user",""),  saved.get("name",""),
+                    saved.get("email",""), saved.get("mob",""),
+                    saved.get("dob",""),   saved.get("pass",""),
+                )
+                if ok:
+                    st.success("✅ Account created! Please switch to the Log In tab.")
+                    for k in ["signup_otp_verified","signup_otp_sent",
+                              "signup_identifier","signup_data"]:
+                        st.session_state.pop(k, None)
                 else:
-                    ok, msg = signup(s_user, s_name, s_email, s_mob, s_dob, s_pass)
-                    if ok:
-                        st.success(f"✅ {msg} Please switch to Log In tab.")
-                        # Reset signup state
-                        for k in ["signup_otp_verified","signup_otp_sent",
-                                  "signup_mobile","signup_identifier"]:
-                            st.session_state.pop(k, None)
-                    else:
-                        st.error(f"❌ {msg}")
+                    st.error(f"❌ {msg}")
 
     st.markdown('</div>', unsafe_allow_html=True)
     st.stop()
