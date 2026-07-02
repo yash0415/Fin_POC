@@ -8,6 +8,7 @@ import pandas as pd
 from pathlib import Path
 from datetime import datetime
 from auth import all_users, delete_user, admin_update_user, get_user
+from db import load_submissions, REPORTS_DIR, is_supabase_connected
 
 DATA_DIR    = Path(__file__).parent / "data"
 REPORTS_DIR = DATA_DIR / "reports"
@@ -16,6 +17,120 @@ SUBS_FILE   = DATA_DIR / "submissions.json"
 # ── Ensure folders exist ───────────────────────────────────────────────────────
 DATA_DIR.mkdir(exist_ok=True)
 REPORTS_DIR.mkdir(exist_ok=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DB HEALTH CHECK
+# ─────────────────────────────────────────────────────────────────────────────
+def run_db_check():
+    """
+    Runs a full Supabase connection test.
+    Returns a dict of results for each test step.
+    """
+    results = {}
+    from db import _get_supabase, DATA_DIR, USERS_FILE, SUBS_FILE, REPORTS_DIR
+
+    # ── Test 1: Supabase secrets configured ──────────────────────────────────
+    try:
+        url = st.secrets.get("SUPABASE_URL","")
+        key = st.secrets.get("SUPABASE_KEY","")
+        if url and key and "supabase.co" in url:
+            results["secrets"] = ("✅", "Secrets configured", f"URL: {url[:40]}...")
+        else:
+            results["secrets"] = ("❌", "Secrets missing", "SUPABASE_URL or SUPABASE_KEY not set in Streamlit Secrets")
+    except Exception as e:
+        results["secrets"] = ("❌", "Cannot read secrets", str(e))
+
+    # ── Test 2: Supabase client creation ─────────────────────────────────────
+    try:
+        sb, _ = _get_supabase(), None
+        sb = _get_supabase()  # returns client or None
+        if sb:
+            results["client"] = ("✅", "Client created", "supabase-py connected successfully")
+        else:
+            results["client"] = ("❌", "Client failed", "Could not create Supabase client — check URL and KEY")
+    except Exception as e:
+        results["client"] = ("❌", "Client error", str(e))
+
+    # ── Test 3: Read from users table ─────────────────────────────────────────
+    try:
+        from db import _get_supabase as _gsb
+        sb = _gsb()
+        if sb:
+            res  = sb.table("users").select("username").limit(1).execute()
+            cnt  = len(res.data) if res.data else 0
+            results["read_users"] = ("✅", "Users table readable", f"Query successful — {cnt} row(s) returned")
+        else:
+            results["read_users"] = ("⚠️", "Skipped", "No Supabase client")
+    except Exception as e:
+        results["read_users"] = ("❌", "Users table error", f"{e} — Did you run supabase_setup.sql?")
+
+    # ── Test 4: Read from submissions table ──────────────────────────────────
+    try:
+        from db import _get_supabase as _gsb
+        sb = _gsb()
+        if sb:
+            res  = sb.table("submissions").select("id").limit(1).execute()
+            cnt  = len(res.data) if res.data else 0
+            results["read_subs"] = ("✅", "Submissions table readable", f"Query successful — {cnt} row(s) returned")
+        else:
+            results["read_subs"] = ("⚠️", "Skipped", "No Supabase client")
+    except Exception as e:
+        results["read_subs"] = ("❌", "Submissions table error", f"{e} — Did you run supabase_setup.sql?")
+
+    # ── Test 5: Write + delete test row ──────────────────────────────────────
+    try:
+        from db import _get_supabase as _gsb
+        sb = _gsb()
+        if sb:
+            test_user = {
+                "username":   "__db_test__",
+                "full_name":  "DB Test",
+                "email":      "test@finsight-internal.test",
+                "mobile":     "0000000000",
+                "dob":        "2000-01-01",
+                "age":        0,
+                "password":   "test",
+                "created_at": datetime.now().isoformat(),
+                "reports":    [],
+                "finance":    {},
+            }
+            # Insert
+            sb.table("users").upsert(test_user).execute()
+            # Read back
+            res = sb.table("users").select("username").eq("username","__db_test__").execute()
+            if res.data:
+                # Delete test row
+                sb.table("users").delete().eq("username","__db_test__").execute()
+                results["write"] = ("✅", "Write & delete successful", "Inserted, read back, and deleted a test row — DB is fully working")
+            else:
+                results["write"] = ("❌", "Write failed", "Row was inserted but could not be read back")
+        else:
+            results["write"] = ("⚠️", "Skipped", "No Supabase client")
+    except Exception as e:
+        results["write"] = ("❌", "Write error", str(e))
+
+    # ── Test 6: Local file system ─────────────────────────────────────────────
+    try:
+        DATA_DIR.mkdir(exist_ok=True)
+        test_file = DATA_DIR / "_fs_test.txt"
+        test_file.write_text("ok")
+        test_file.read_text()
+        test_file.unlink()
+        results["filesystem"] = ("✅", "Local filesystem writable", str(DATA_DIR.resolve()))
+    except Exception as e:
+        results["filesystem"] = ("⚠️", "Filesystem not writable", f"{e} — On Streamlit Cloud, local files are ephemeral anyway")
+
+    # ── Test 7: User count ────────────────────────────────────────────────────
+    try:
+        from db import get_all_users
+        users = get_all_users()
+        results["user_count"] = ("✅", f"{len(users)} registered user(s) in DB", 
+                                  ", ".join(list(users.keys())[:5]) + ("..." if len(users)>5 else "") or "none yet")
+    except Exception as e:
+        results["user_count"] = ("❌", "Could not count users", str(e))
+
+    return results
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -152,14 +267,11 @@ def render():
     st.markdown(ADMIN_CSS, unsafe_allow_html=True)
 
     # ── Hero Banner ───────────────────────────────────────────────────────────
-    st.markdown("""
-    <div class="admin-hero">
-      <h2>🛡️ Admin Dashboard</h2>
-      <p>Yash Wankar · FinSight Internal Portal · All user data & reports</p>
-    </div>""", unsafe_allow_html=True)
+    db_tag = "🟢 Supabase — permanent" if is_supabase_connected() else "🟡 Local JSON — add Supabase"
+    st.markdown(f"""<div class="admin-hero"><h2>🛡️ Admin Dashboard</h2><p>Yash Wankar · FinSight Portal</p><p style="font-size:.78rem;opacity:.8;margin-top:6px">{db_tag}</p></div>""", unsafe_allow_html=True)
 
     users = all_users()
-    subs  = _load_submissions()
+    subs  = load_submissions()
     pdfs  = sorted(REPORTS_DIR.glob("*.pdf"), reverse=True)
 
     paid_subs  = [s for s in subs if s.get("paid")]
@@ -183,12 +295,13 @@ def render():
     st.markdown("---")
 
     # ── TABS ─────────────────────────────────────────────────────────────────
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
         f"📋 All Reports  ({len(subs)})",
         f"💰 Paid Only  ({len(paid_subs)})",
         f"👥 Users  ({len(users)})",
         f"📁 PDF Files  ({len(pdfs)})",
         "⚙️ Manage Users",
+        "🔌 DB Status",
     ])
 
     # ═════════════════════════════════════════════════════════════════════════
@@ -473,6 +586,145 @@ def render():
                     if st.button("👁️ View", key=f"ss_view_{i}"):
                         st.image(str(ss), caption=ss.name, use_column_width=True)
 
+
+    # ═════════════════════════════════════════════════════════════════════════
+    # TAB 6 — DB STATUS & HEALTH CHECK
+    # ═════════════════════════════════════════════════════════════════════════
+    with tab6:
+        st.markdown('<div class="astl">🔌 Database Connection Status</div>', unsafe_allow_html=True)
+
+        # Live status badge
+        if is_supabase_connected():
+            st.markdown("""
+            <div style="background:#f0fdf4;border:2px solid #86efac;border-radius:14px;
+                        padding:20px 28px;margin:12px 0;display:flex;align-items:center;gap:16px">
+              <div style="font-size:2.5rem">🟢</div>
+              <div>
+                <div style="font-weight:700;color:#15803d;font-size:1.1rem">Supabase Connected</div>
+                <div style="color:#166534;font-size:.85rem;margin-top:2px">
+                  User data is stored permanently in the cloud database. 
+                  Accounts will NOT be lost on app restart or redeploy.
+                </div>
+              </div>
+            </div>""", unsafe_allow_html=True)
+        else:
+            st.markdown("""
+            <div style="background:#fffbeb;border:2px solid #fcd34d;border-radius:14px;
+                        padding:20px 28px;margin:12px 0;display:flex;align-items:center;gap:16px">
+              <div style="font-size:2.5rem">🟡</div>
+              <div>
+                <div style="font-weight:700;color:#92400e;font-size:1.1rem">Local JSON Mode</div>
+                <div style="color:#78350f;font-size:.85rem;margin-top:2px">
+                  Data is stored in local files only. On Streamlit Cloud, users will be 
+                  lost on every restart. Add SUPABASE_URL and SUPABASE_KEY to Secrets to fix this.
+                </div>
+              </div>
+            </div>""", unsafe_allow_html=True)
+
+        # Show secrets status
+        st.markdown('<div class="astl">🔑 Secrets Configuration</div>', unsafe_allow_html=True)
+        secret_keys = ["ADMIN_USER","ADMIN_PASS","SUPABASE_URL","SUPABASE_KEY","TWILIO_SID","TWILIO_TOKEN","TWILIO_VERIFY_SID"]
+        sc1, sc2 = st.columns(2)
+        for i, key in enumerate(secret_keys):
+            col = sc1 if i % 2 == 0 else sc2
+            with col:
+                try:
+                    val = st.secrets.get(key, "")
+                    if val:
+                        # Show partially masked value
+                        masked = val[:6] + "..." + val[-4:] if len(val) > 10 else "****"
+                        st.markdown(f"""
+                        <div style="background:#f0fdf4;border:1px solid #86efac;border-radius:8px;
+                                    padding:10px 14px;margin:4px 0">
+                          <div style="font-size:.68rem;font-weight:700;color:#94a3b8;text-transform:uppercase">{key}</div>
+                          <div style="font-size:.9rem;font-weight:600;color:#15803d">✅ Set &nbsp;<span style="font-family:monospace;font-size:.8rem;color:#64748b">{masked}</span></div>
+                        </div>""", unsafe_allow_html=True)
+                    else:
+                        st.markdown(f"""
+                        <div style="background:#fef2f2;border:1px solid #fca5a5;border-radius:8px;
+                                    padding:10px 14px;margin:4px 0">
+                          <div style="font-size:.68rem;font-weight:700;color:#94a3b8;text-transform:uppercase">{key}</div>
+                          <div style="font-size:.9rem;font-weight:600;color:#ef4444">❌ Not set</div>
+                        </div>""", unsafe_allow_html=True)
+                except Exception:
+                    st.markdown(f"""
+                    <div style="background:#fef2f2;border:1px solid #fca5a5;border-radius:8px;
+                                padding:10px 14px;margin:4px 0">
+                      <div style="font-size:.68rem;font-weight:700;color:#94a3b8;text-transform:uppercase">{key}</div>
+                      <div style="font-size:.9rem;color:#ef4444">❌ Not set</div>
+                    </div>""", unsafe_allow_html=True)
+
+        # Run full check button
+        st.markdown('<div class="astl">🧪 Run Full Connection Test</div>', unsafe_allow_html=True)
+        st.caption("Tests each step: secrets → client → read users table → read submissions table → write test row → delete test row")
+
+        if st.button("▶️ Run DB Health Check Now", type="primary", use_container_width=False, key="btn_run_dbcheck"):
+            with st.spinner("Running tests..."):
+                results = run_db_check()
+
+            test_labels = {
+                "secrets":      "Secrets configured",
+                "client":       "Supabase client created",
+                "read_users":   "Read from users table",
+                "read_subs":    "Read from submissions table",
+                "write":        "Write + delete test row",
+                "filesystem":   "Local filesystem",
+                "user_count":   "Users in database",
+            }
+            all_passed = all(v[0] == "✅" for v in results.values())
+
+            if all_passed:
+                st.success("✅ All tests passed! Database is fully connected and working.")
+            else:
+                failed = [k for k, v in results.items() if v[0] == "❌"]
+                st.error(f"❌ {len(failed)} test(s) failed: {', '.join(failed)}")
+
+            for key, (icon, title, detail) in results.items():
+                bg    = "#f0fdf4" if icon=="✅" else "#fef2f2" if icon=="❌" else "#fffbeb"
+                bord  = "#86efac" if icon=="✅" else "#fca5a5" if icon=="❌" else "#fcd34d"
+                tcolor= "#15803d" if icon=="✅" else "#991b1b" if icon=="❌" else "#92400e"
+                dcolor= "#166534" if icon=="✅" else "#7f1d1d" if icon=="❌" else "#78350f"
+                label = test_labels.get(key, key)
+                st.markdown(f"""
+                <div style="background:{bg};border:1px solid {bord};border-radius:10px;
+                            padding:12px 18px;margin:5px 0">
+                  <div style="display:flex;align-items:center;gap:10px">
+                    <span style="font-size:1.2rem">{icon}</span>
+                    <div>
+                      <div style="font-weight:700;color:{tcolor};font-size:.9rem">{label}</div>
+                      <div style="color:{dcolor};font-size:.8rem;margin-top:2px">{detail}</div>
+                    </div>
+                  </div>
+                </div>""", unsafe_allow_html=True)
+
+        # Quick fix guide
+        st.markdown('<div class="astl">🛠️ Troubleshooting</div>', unsafe_allow_html=True)
+        with st.expander("❌ Users table or submissions table errors"):
+            st.markdown("""
+1. Go to your **Supabase project → SQL Editor**
+2. Open the file `supabase_setup.sql` (included in the zip)
+3. Paste the contents and click **Run**
+4. This creates the `users` and `submissions` tables with correct structure
+5. Re-run the health check above
+            """)
+        with st.expander("❌ Secrets not set / client failed"):
+            st.markdown("""
+1. Go to **share.streamlit.io → your app → Settings → Secrets**
+2. Paste:
+```
+SUPABASE_URL = "https://xxxx.supabase.co"
+SUPABASE_KEY = "your-anon-public-key"
+```
+3. Get these from **Supabase → Settings → API**
+4. Click **Save** then **Reboot app**
+            """)
+        with st.expander("✅ Connected but users still disappear?"):
+            st.markdown("""
+- Make sure `SUPABASE_URL` and `SUPABASE_KEY` are set in Streamlit Secrets
+- The 🟢 badge at the top of the sidebar confirms Supabase is active
+- If you see 🟡 (local mode), secrets are missing — add them and reboot the app
+- Run the health check above and look for any ❌ failed tests
+            """)
 
     # ═════════════════════════════════════════════════════════════════════════
     # TAB 5 — MANAGE USERS (edit / delete)
