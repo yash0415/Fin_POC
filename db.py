@@ -11,7 +11,6 @@ Setup Supabase (free, 5 minutes):
       SUPABASE_KEY = "your-anon-key"
 """
 
-
 import json
 import streamlit as st
 from pathlib import Path
@@ -26,15 +25,40 @@ REPORTS_DIR= DATA_DIR / "reports"
 REPORTS_DIR.mkdir(exist_ok=True)
 
 # ── Try to connect to Supabase ─────────────────────────────────────────────────
+# Cache the client so we don't recreate it on every call
+_supabase_client = None
+_supabase_error  = None
+
 def _get_supabase():
-    """Returns Supabase client or None if not configured."""
+    """Returns Supabase client or None. Caches result. Stores error for diagnostics."""
+    global _supabase_client, _supabase_error
+    if _supabase_client is not None:
+        return _supabase_client
     try:
         url = st.secrets["SUPABASE_URL"]
         key = st.secrets["SUPABASE_KEY"]
+        # Validate key format — must be JWT (starts with eyJ)
+        if not key.strip().startswith("eyJ"):
+            _supabase_error = (
+                f"Wrong key type. You used a key starting with '{key[:6]}...'. "
+                "Supabase requires the ANON/PUBLIC JWT key which starts with 'eyJ...'. "
+                "Go to Supabase → Settings → API → copy the 'anon public' key (long JWT string)."
+            )
+            return None
         from supabase import create_client
-        return create_client(url, key)
-    except Exception:
+        _supabase_client = create_client(url.strip(), key.strip())
+        _supabase_error  = None
+        return _supabase_client
+    except KeyError:
+        _supabase_error = "SUPABASE_URL or SUPABASE_KEY not found in Streamlit Secrets."
         return None
+    except Exception as e:
+        _supabase_error = str(e)
+        return None
+
+def get_supabase_error():
+    """Returns the last error from _get_supabase() for diagnostics."""
+    return _supabase_error
 
 def _use_supabase():
     return _get_supabase() is not None
@@ -232,3 +256,7 @@ def save_user_report(username: str, report_meta: dict):
 
 def is_supabase_connected() -> bool:
     return _use_supabase()
+
+def get_connection_error() -> str:
+    """Returns human-readable error if Supabase is not connected."""
+    return get_supabase_error() or ""
