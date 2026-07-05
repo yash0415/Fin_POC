@@ -113,10 +113,14 @@ def _get_sb() -> SupabaseREST | None:
         return _sb
     _sb_init = True
     try:
-        url = st.secrets.get("SUPABASE_URL", "")
-        key = st.secrets.get("SUPABASE_KEY", "")
+        try:
+            url = st.secrets["SUPABASE_URL"]
+            key = st.secrets["SUPABASE_KEY"]
+        except KeyError as ke:
+            _sb_err = f"Secret {ke} not set in Streamlit Secrets."
+            return None
         if not url or not key:
-            _sb_err = "SUPABASE_URL or SUPABASE_KEY not set in Streamlit Secrets."
+            _sb_err = "SUPABASE_URL or SUPABASE_KEY is empty in Streamlit Secrets."
             return None
         client = SupabaseREST(url.strip(), key.strip())
         # Quick ping to verify it actually works

@@ -28,12 +28,14 @@ def run_db_check():
 
     # ── Test 1: Supabase secrets configured ──────────────────────────────────
     try:
-        url = st.secrets.get("SUPABASE_URL","")
-        key = st.secrets.get("SUPABASE_KEY","")
-        if url and key and "supabase.co" in url:
+        url = st.secrets["SUPABASE_URL"]
+        key = st.secrets["SUPABASE_KEY"]
+        if url and key and "supabase" in url:
             results["secrets"] = ("✅", "Secrets configured", f"URL: {url[:40]}...")
         else:
-            results["secrets"] = ("❌", "Secrets missing", "SUPABASE_URL or SUPABASE_KEY not set in Streamlit Secrets")
+            results["secrets"] = ("❌", "Secrets incomplete", "URL or KEY appears empty")
+    except KeyError as e:
+        results["secrets"] = ("❌", "Secret missing", f"{e} not found in Streamlit Secrets")
     except Exception as e:
         results["secrets"] = ("❌", "Cannot read secrets", str(e))
 
@@ -618,7 +620,7 @@ def render():
             col = sc1 if i % 2 == 0 else sc2
             with col:
                 try:
-                    val = st.secrets.get(key, "")
+                    val = st.secrets[key]
                     if val:
                         # Show partially masked value
                         masked = val[:6] + "..." + val[-4:] if len(val) > 10 else "****"
