@@ -7,7 +7,6 @@ import streamlit as st
 import plotly.graph_objects as go
 import pandas as pd
 import io
-import os
 import json
 from pathlib import Path
 from reportlab.lib.pagesizes import A4
@@ -18,10 +17,16 @@ from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer, Table,
                                  TableStyle, HRFlowable, PageBreak)
 from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
 from datetime import datetime, date
-from auth import (signup, login, login_by_mobile, save_user_report, all_users,
+from auth import (signup, login, save_user_report, all_users,
                   get_user, save_finance, load_finance, update_profile,
-                  generate_otp, verify_otp, send_otp_sms, delete_user, admin_update_user)
+                  delete_user, admin_update_user)
 from admin import render as render_admin
+
+DATA_DIR    = Path(__file__).parent / "data"
+REPORTS_DIR = DATA_DIR / "reports"
+SUBS_FILE   = DATA_DIR / "submissions.json"
+DATA_DIR.mkdir(exist_ok=True)
+REPORTS_DIR.mkdir(exist_ok=True)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # ░░  CONFIG  ░░
@@ -54,8 +59,8 @@ try:
     ADMIN_USER = st.secrets["ADMIN_USER"]
     ADMIN_PASS = st.secrets["ADMIN_PASS"]
 except Exception:
-    ADMIN_USER = "admin"
-    ADMIN_PASS = "Yash@2026"
+    ADMIN_USER = "yashwankar"
+    ADMIN_PASS = "Yash@2025#FS"
 
 PAGES = [
     "🏠  Profile & Income",
@@ -85,23 +90,26 @@ DATA_DIR.mkdir(exist_ok=True)
 REPORTS_DIR.mkdir(exist_ok=True)
 
 def save_report_to_disk(pdf_bytes, meta):
-    """Save PDF + metadata to data/reports/. Returns filename."""
+    """Save PDF and metadata to local files. Returns filename."""
     ts    = datetime.now().strftime("%Y%m%d_%H%M%S")
     safe  = (meta.get("name","Client") or "Client").replace(" ","_")
     fname = f"{ts}_{safe}.pdf"
-    (REPORTS_DIR / fname).write_bytes(pdf_bytes)
-    meta["pdf_file"]  = fname
-    meta["saved_at"]  = ts
+    try: (REPORTS_DIR / fname).write_bytes(pdf_bytes)
+    except Exception: pass
+    meta["pdf_file"] = fname
+    meta["saved_at"] = ts
+    # Save metadata to submissions log
     try:
-        existing = json.loads(SUBS_FILE.read_text()) if SUBS_FILE.exists() else []
-    except Exception:
-        existing = []
-    existing.append(meta)
-    SUBS_FILE.write_text(json.dumps(existing, indent=2, ensure_ascii=False))
-    # also attach to user account
+        subs = []
+        if SUBS_FILE.exists():
+            try: subs = json.loads(SUBS_FILE.read_text())
+            except: pass
+        subs.append(meta)
+        SUBS_FILE.write_text(json.dumps(subs, indent=2, ensure_ascii=False))
+    except Exception: pass
     uname = meta.get("username","")
     if uname:
-        save_user_report(uname, {k: meta[k] for k in ["pdf_file","saved_at","score","score_label","net_worth"]})
+        save_user_report(uname, {k: meta.get(k,"") for k in ["pdf_file","saved_at","score","score_label","net_worth"]})
     return fname
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -938,7 +946,6 @@ def do_logout():
     st.rerun()
 
 def _do_user_login(user):
-    """Set session state after successful login and load saved finance data."""
     st.session_state.auth_logged_in = True
     st.session_state.auth_user      = user["username"]
     st.session_state.auth_role      = "user"
@@ -948,7 +955,6 @@ def _do_user_login(user):
     st.session_state.auth_dob       = user.get("dob","")
     st.session_state.name           = user.get("full_name","")
     st.session_state.age            = user.get("age", 28)
-    # Load persisted finance data
     fd = load_finance(user["username"])
     for k, v in fd.items():
         st.session_state[k] = v
@@ -964,182 +970,52 @@ if not st.session_state.get("auth_logged_in", False):
 
     tab_login, tab_signup = st.tabs(["🔑  Log In", "📝  Sign Up"])
 
-    # ════════════════════════════════════════════════════════════════════════
-    # LOGIN TAB
-    # ════════════════════════════════════════════════════════════════════════
     with tab_login:
         st.markdown("")
-        login_method = st.radio("Login with:", ["Username & Password", "Mobile OTP"],
-                                 horizontal=True, key="li_method")
-        st.markdown("")
-
-        if login_method == "Username & Password":
-            lu = st.text_input("Username", key="li_user", placeholder="your username")
-            lp = st.text_input("Password", type="password", key="li_pass", placeholder="••••••••")
+        with st.form("login_form"):
+            lu = st.text_input("Username", placeholder="your username")
+            lp = st.text_input("Password", type="password", placeholder="••••••••")
             st.markdown('<p style="font-size:.72rem;color:#94a3b8;text-align:center">Admin? Use your admin credentials.</p>', unsafe_allow_html=True)
-            if st.button("Log In →", type="primary", use_container_width=True, key="btn_login_pw"):
-                # ── Admin check FIRST — independent of any file/database ──────
-                if lu.strip().lower() == ADMIN_USER.lower() and lp == ADMIN_PASS:
-                    st.session_state.auth_logged_in = True
-                    st.session_state.auth_user      = ADMIN_USER
-                    st.session_state.auth_role      = "admin"
-                    st.session_state.auth_full_name = "Yash Wankar"
-                    st.rerun()
-                else:
-                    # Regular user login — reads from data/users.json
-                    try:
-                        ok, msg, user = login(lu.strip(), lp)
-                        if ok: _do_user_login(user); st.rerun()
-                        else: st.error(f"❌ {msg}")
-                    except Exception as _e:
-                        st.error(f"❌ Login error: {_e}. If you are admin, double-check your credentials.")
-
-        else:  # Mobile OTP login
-            li_mob = st.text_input("Mobile Number (10 digits)", key="li_mob", placeholder="9876543210")
-            if not st.session_state.get("login_otp_sent"):
-                if st.button("Send OTP →", type="primary", use_container_width=True, key="btn_send_otp_login"):
-                    ok, msg, user = login_by_mobile(li_mob.strip())
-                    if ok:
-                        otp    = generate_otp(li_mob.strip())
-                        result = send_otp_sms(li_mob.strip(), otp)
-                        st.session_state.otp_sent         = True
-                        st.session_state.otp_identifier   = li_mob.strip()
-                        st.session_state.otp_pending_user = user
-                        if result == "twilio":
-                            st.info(f"📱 OTP sent to +91 {li_mob.strip()} via SMS. Enter it below.")
-                        else:
-                            st.info(f"📱 Demo mode (Twilio not configured). Your OTP is: **{result}**")
-                        st.rerun()
+            login_btn = st.form_submit_button("Log In →", type="primary", use_container_width=True)
+        if login_btn:
+            if lu.strip().lower() == ADMIN_USER.lower() and lp == ADMIN_PASS:
+                st.session_state.auth_logged_in = True
+                st.session_state.auth_user      = ADMIN_USER
+                st.session_state.auth_role      = "admin"
+                st.session_state.auth_full_name = "Yash Wankar"
+                st.rerun()
+            else:
+                try:
+                    ok, msg, user = login(lu.strip(), lp)
+                    if ok: _do_user_login(user); st.rerun()
                     else: st.error(f"❌ {msg}")
-            elif st.session_state.get("login_otp_sent"):
-                st.info(f"OTP sent to +91 {st.session_state.otp_identifier}")
-                li_otp = st.text_input("Enter 6-digit OTP", key="li_otp", placeholder="______", max_chars=6)
-                c1, c2 = st.columns(2)
-                with c1:
-                    if st.button("Verify OTP →", type="primary", use_container_width=True, key="btn_verify_login"):
-                        ok, msg = verify_otp(st.session_state.otp_identifier, li_otp)
-                        if ok:
-                            _do_user_login(st.session_state.otp_pending_user)
-                            st.session_state.login_otp_sent = False
-                            st.rerun()
-                        else: st.error(f"❌ {msg}")
-                with c2:
-                    if st.button("Resend OTP", use_container_width=True, key="btn_resend_login"):
-                        mob    = st.session_state.otp_identifier
-                        otp    = generate_otp(mob)
-                        result = send_otp_sms(mob, otp)
-                        if result == "twilio": st.info(f"📱 New OTP sent to +91 {mob}.")
-                        else: st.info(f"📱 (Demo) New OTP: **{result}**")
+                except Exception as e:
+                    st.error(f"❌ Login error: {e}")
 
-    # ════════════════════════════════════════════════════════════════════════
-    # SIGNUP TAB  — uses st.form so ALL field values are captured together
-    # ════════════════════════════════════════════════════════════════════════
     with tab_signup:
         st.markdown("")
-
-        # ── STEP 1: Collect details + Send OTP ───────────────────────────────
-        if not st.session_state.get("signup_otp_verified"):
-
-            # st.form ensures every field value is captured before button fires
-            with st.form("signup_form_step1"):
-                f_name  = st.text_input("Full Name *",                         placeholder="e.g. Arjun Mehta")
-                f_email = st.text_input("Email Address *",                     placeholder="you@example.com")
-                f_mob   = st.text_input("Mobile Number * (10 digits, no +91)", placeholder="9876543210")
-                f_dob   = st.date_input("Date of Birth *",
-                                         min_value=date(1950,1,1),
-                                         max_value=date.today(),
-                                         value=date(1995,1,1))
-                f_user  = st.text_input("Choose Username *",  placeholder="min 3 chars, no spaces")
-                f_pass  = st.text_input("Password *",          type="password", placeholder="min 6 characters")
-                f_pass2 = st.text_input("Confirm Password *",  type="password")
-                send_btn = st.form_submit_button("📱 Send OTP to Verify Mobile →",
-                                                  type="primary", use_container_width=True)
-
-            if send_btn:
-                # Inside form submit — ALL field values are reliably available
-                mob = f_mob.strip().replace(" ","").replace("-","").replace("+91","")
-                if not f_name.strip():
-                    st.error("❌ Full name is required.")
-                elif not f_email.strip() or "@" not in f_email:
-                    st.error("❌ Enter a valid email address.")
-                elif not mob.isdigit() or len(mob) != 10:
-                    st.error(f"❌ Enter a valid 10-digit mobile number (digits only, no spaces).")
-                elif not f_user.strip() or len(f_user.strip()) < 3:
-                    st.error("❌ Username must be at least 3 characters.")
-                elif " " in f_user.strip():
-                    st.error("❌ Username cannot have spaces.")
-                elif len(f_pass) < 6:
-                    st.error("❌ Password must be at least 6 characters.")
-                elif f_pass != f_pass2:
-                    st.error("❌ Passwords do not match.")
-                else:
-                    # Save all details to session BEFORE sending OTP
-                    st.session_state.signup_data = {
-                        "name":  f_name.strip(),
-                        "email": f_email.strip(),
-                        "mob":   mob,
-                        "dob":   str(f_dob),
-                        "user":  f_user.strip().lower(),
-                        "pass":  f_pass,
-                    }
-                    otp    = generate_otp(f"signup_{mob}")
-                    result = send_otp_sms(mob, otp)
-                    st.session_state.signup_otp_sent   = True
-                    st.session_state.signup_identifier = f"signup_{mob}"
-                    if result == "twilio":
-                        st.info(f"📱 OTP sent to +91 {mob} via SMS.")
-                    else:
-                        st.info(f"📱 Demo mode — Twilio not configured. Your OTP is: **{result}**")
-
-        # ── STEP 2: Enter OTP ─────────────────────────────────────────────────
-        if st.session_state.get("signup_otp_sent") and not st.session_state.get("signup_otp_verified"):
-            saved = st.session_state.get("signup_data", {})
-            mob   = saved.get("mob", "")
-            st.markdown(f'<div class="ab b">📱 OTP sent to <b>+91 {mob}</b>. Enter the 6-digit code below.</div>', unsafe_allow_html=True)
-
-            with st.form("signup_form_otp"):
-                entered_otp = st.text_input("Enter 6-digit OTP", placeholder="______", max_chars=6)
-                oc1, oc2   = st.columns(2)
-                with oc1: verify_btn = st.form_submit_button("✅ Verify OTP", type="primary", use_container_width=True)
-                with oc2: resend_btn = st.form_submit_button("🔄 Resend OTP", use_container_width=True)
-
-            if verify_btn:
-                ident   = st.session_state.get("signup_identifier", "")
-                ok, msg = verify_otp(ident, entered_otp.strip())
-                if ok:
-                    st.session_state.signup_otp_verified = True
-                    st.session_state.signup_otp_sent     = False
-                    st.success("✅ Mobile verified!")
-                    st.rerun()
-                else:
-                    st.error(f"❌ {msg}")
-
-            if resend_btn:
-                otp    = generate_otp(f"signup_{mob}")
-                result = send_otp_sms(mob, otp)
-                if result == "twilio": st.info(f"📱 New OTP sent to +91 {mob}.")
-                else: st.info(f"📱 (Demo) New OTP: **{result}**")
-
-        # ── STEP 3: Create Account ────────────────────────────────────────────
-        if st.session_state.get("signup_otp_verified"):
-            saved = st.session_state.get("signup_data", {})
-            mob   = saved.get("mob","")
-            st.markdown(f'<div class="ab g">✅ Mobile +91 {mob} verified! Click below to create your account.</div>', unsafe_allow_html=True)
-
-            if st.button("🚀 Create Account →", type="primary",
-                          use_container_width=True, key="btn_create_account"):
-                ok, msg = signup(
-                    saved.get("user",""),  saved.get("name",""),
-                    saved.get("email",""), saved.get("mob",""),
-                    saved.get("dob",""),   saved.get("pass",""),
-                )
-                if ok:
-                    st.success("✅ Account created! Please switch to the Log In tab.")
-                    for k in ["signup_otp_verified","signup_otp_sent",
-                              "signup_identifier","signup_data"]:
-                        st.session_state.pop(k, None)
-                else:
-                    st.error(f"❌ {msg}")
+        with st.form("signup_form"):
+            f_name  = st.text_input("Full Name *",                          placeholder="e.g. Arjun Mehta")
+            f_email = st.text_input("Email Address *",                      placeholder="you@example.com")
+            f_mob   = st.text_input("Mobile Number * (10 digits, no +91)",  placeholder="9876543210")
+            f_dob   = st.date_input("Date of Birth *", min_value=date(1950,1,1), max_value=date.today(), value=date(1995,1,1))
+            f_user  = st.text_input("Choose Username *", placeholder="min 3 chars, no spaces")
+            f_pass  = st.text_input("Password *",         type="password", placeholder="min 6 characters")
+            f_pass2 = st.text_input("Confirm Password *", type="password")
+            signup_btn = st.form_submit_button("Create Account →", type="primary", use_container_width=True)
+        if signup_btn:
+            mob = f_mob.strip().replace(" ","").replace("-","").replace("+91","")
+            if f_pass != f_pass2:
+                st.error("❌ Passwords do not match.")
+            elif not f_name.strip():
+                st.error("❌ Full name is required.")
+            elif not mob.isdigit() or len(mob) != 10:
+                st.error("❌ Enter a valid 10-digit mobile number.")
+            else:
+                ok, msg = signup(f_user.strip().lower(), f_name.strip(),
+                                  f_email.strip(), mob, str(f_dob), f_pass)
+                if ok: st.success(f"✅ {msg} Please log in.")
+                else:  st.error(f"❌ {msg}")
 
     st.markdown('</div>', unsafe_allow_html=True)
     st.stop()
@@ -1206,7 +1082,7 @@ with st.sidebar:
     st.progress(filled/5, text=f"Finance {filled}/5 filled")
     if s.get("salary"): st.markdown(f"💰 {fmt(s.salary+s.get('other_income',0))}/mo")
     st.markdown("---")
-    st.markdown('<p style="font-size:.72rem;color:#475569;line-height:1.5">Data auto-saved to your account.</p>', unsafe_allow_html=True)
+    st.markdown('<p style="font-size:.72rem;color:#475569;line-height:1.5">Data saved to your account.</p>', unsafe_allow_html=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1321,15 +1197,22 @@ elif page == "💸  Expenses & EMIs":
     with cc[3]: st.markdown(f'<div class="mc a"><div class="mc-lbl">Outstanding Debt</div><div class="mc-val">{fmt(sum(e["outstanding"] for e in emis))}</div></div>', unsafe_allow_html=True)
 
     if emis:
-        df = pd.DataFrame(emis)[["name","amount","months_left","rate","outstanding","interest_cost"]]
-        df.columns=["Loan","EMI/mo (₹)","Months Left","Rate %","Outstanding (₹)","Interest Cost (est.)"]
-        df["EMI/mo (₹)"]=df["EMI/mo (₹)"].apply(lambda x:f"₹{x:,}")
-        df["Outstanding (₹)"]=df["Outstanding (₹)"].apply(lambda x:f"₹{x:,}")
-        df["Interest Cost (est.)"]=df["Interest Cost (est.)"].apply(lambda x:f"₹{x:,.0f}")
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        # Build display df safely — ensure all keys exist
+        display_rows = []
+        for e in emis:
+            display_rows.append({
+                "Loan":                 e.get("name",""),
+                "EMI/month":            f"₹{e.get('amount',0):,}",
+                "Months Left":          e.get("months_left",0),
+                "Rate (% p.a.)":        f"{e.get('rate',0)}%",
+                "Total Payable":        f"₹{e.get('outstanding',0):,.0f}",
+                "Interest Till End":    f"₹{e.get('interest_cost',0):,.0f}",
+            })
+        if display_rows:
+            st.dataframe(pd.DataFrame(display_rows), use_container_width=True, hide_index=True)
         total_interest = sum(e.get("interest_cost",0) for e in emis)
         if total_interest > 0:
-            st.markdown(f'<div class="ab a">💸 Estimated total interest you will pay across all loans: <b>₹{total_interest:,.0f}</b>. Prepaying high-rate loans first saves this amount.</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="ab a">💸 Total interest you will pay across all loans: <b>₹{total_interest:,.0f}</b>. Prepaying the highest-rate loan first saves the most.</div>', unsafe_allow_html=True)
 
     if total_exp > ti * .7: st.markdown('<div class="ab r">🚨 Expenses are 70%+ of income. This is critical — immediate budget review needed.</div>', unsafe_allow_html=True)
     elif total_exp > ti * .5: st.markdown('<div class="ab a">⚠️ Expenses above 50% of income. Trimming ₹2,000/month = ₹24K/year saved.</div>', unsafe_allow_html=True)
@@ -1881,17 +1764,7 @@ elif page == "🤝  Consult an Advisor":
             st.markdown(f'<div class="svc"><div style="font-size:1.7rem;margin-bottom:8px">{icon}</div><div class="svc-ttl">{title}</div><div class="svc-dsc">{desc}</div></div>', unsafe_allow_html=True)
 
     # ── Services ──────────────────────────────────────────────────────────────
-    st.markdown('<p class="stl">Services & Pricing</p>', unsafe_allow_html=True)
-    sc_cols = st.columns(3)
-    services = [
-        ("","🔍 Financial Health Check","One-time deep-dive: income, expenses, investments, insurance, assets. Written report with prioritised action items you can act on immediately.","₹2,999 — one-time"),
-        ("b","📋 Comprehensive Financial Plan","Full goal-based plan: retirement, children's education, home purchase, tax optimisation, insurance restructuring, portfolio strategy.","₹7,999 — one-time"),
-        ("p","🔄 Annual Advisory Package","Quarterly reviews, unlimited consultations, portfolio rebalancing, dedicated advisor through the year. Your finances — always on track.","₹14,999 / year"),
-    ]
-    for col, (cls, title, desc, price) in zip(sc_cols, services):
-        with col:
-            st.markdown(f'<div class="svc {cls}"><div class="svc-ttl">{title}</div><div class="svc-dsc">{desc}</div><div class="svc-prc">{price}</div></div>', unsafe_allow_html=True)
-
+    # Services & pricing section removed
     # ── Contact ───────────────────────────────────────────────────────────────
     st.markdown('<p class="stl">📞 Get in Touch</p>', unsafe_allow_html=True)
     ct = st.columns(4)
@@ -2049,40 +1922,18 @@ elif page == "👤  My Profile":
                     else: st.error(f"❌ {msg}")
 
         # ── OTP-verify new mobile ─────────────────────────────────────────────
-        st.markdown('<p class="stl">📱 Verify & Change Mobile Number</p>', unsafe_allow_html=True)
-        st.caption("To change your mobile number, verify the new number with OTP first.")
-        vm1, vm2 = st.columns(2)
-        with vm1:
-            new_mobile_verify = st.text_input("New Mobile Number", key="ep_newmob", placeholder="10-digit number")
-        with vm2:
-            st.markdown("<br>", unsafe_allow_html=True)
-            if st.button("📲 Send OTP to new number", use_container_width=True, key="btn_mob_otp"):
-                m = new_mobile_verify.strip()
-                if not m.isdigit() or len(m) != 10:
-                    st.error("❌ Enter a valid 10-digit number.")
-                else:
-                    otp    = generate_otp(f"mob_change_{m}")
-                    result = send_otp_sms(m, otp)
-                    st.session_state["mob_change_pending"] = m
-                    if result == "twilio": st.info(f"📱 OTP sent to +91 {m} via SMS.")
-                    else: st.info(f"📱 (Demo) OTP: **{result}**")
-        if s.get("mob_change_pending"):
-            mc1, mc2 = st.columns(2)
-            with mc1:
-                mob_otp = st.text_input("Enter OTP", key="ep_mobotp", max_chars=6)
-            with mc2:
-                st.markdown("<br>", unsafe_allow_html=True)
-                if st.button("✅ Verify & Update Mobile", use_container_width=True, key="btn_verify_mob_change"):
-                    ok, msg = verify_otp(f"mob_change_{s.mob_change_pending}", mob_otp)
-                    if ok:
-                        ok2, msg2 = update_profile(uname, {"mobile": s.mob_change_pending})
-                        if ok2:
-                            st.success(f"✅ Mobile updated to +91 {s.mob_change_pending}")
-                            st.session_state.auth_mobile = s.mob_change_pending
-                            del st.session_state["mob_change_pending"]
-                            st.rerun()
-                        else: st.error(f"❌ {msg2}")
-                    else: st.error(f"❌ {msg}")
+        # ── Change Mobile ────────────────────────────────────────────────────────
+        st.markdown('<p class="stl">📱 Change Mobile Number</p>', unsafe_allow_html=True)
+        with st.form("chg_mob"):
+            nm = st.text_input("New Mobile (10 digits)", placeholder="9876543210")
+            mb = st.form_submit_button("Update Mobile", use_container_width=True)
+        if mb:
+            m2 = nm.strip().replace(" ","").replace("+91","")
+            if not m2.isdigit() or len(m2)!=10: st.error("❌ Enter a valid 10-digit number.")
+            else:
+                ok2,msg2 = update_profile(uname,{"mobile":m2})
+                if ok2: st.success(f"✅ Mobile updated to +91 {m2}"); st.session_state.auth_mobile=m2
+                else: st.error(f"❌ {msg2}")
 
         # ── Reports history ───────────────────────────────────────────────────
         reports = u_data.get("reports",[])
