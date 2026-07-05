@@ -8,15 +8,10 @@ import pandas as pd
 from pathlib import Path
 from datetime import datetime
 from auth import all_users, delete_user, admin_update_user, get_user
-from db import load_submissions, REPORTS_DIR, is_supabase_connected
+from db import (load_submissions, REPORTS_DIR, DATA_DIR, SUBS_FILE,
+                 is_supabase_connected, get_connection_error, reset_connection)
 
-DATA_DIR    = Path(__file__).parent / "data"
-REPORTS_DIR = DATA_DIR / "reports"
-SUBS_FILE   = DATA_DIR / "submissions.json"
-
-# ── Ensure folders exist ───────────────────────────────────────────────────────
-DATA_DIR.mkdir(exist_ok=True)
-REPORTS_DIR.mkdir(exist_ok=True)
+# DATA_DIR, REPORTS_DIR, SUBS_FILE come from db.py imports
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -28,7 +23,8 @@ def run_db_check():
     Returns a dict of results for each test step.
     """
     results = {}
-    from db import _get_supabase, DATA_DIR, USERS_FILE, SUBS_FILE, REPORTS_DIR
+    from db import _get_sb, get_connection_error, DATA_DIR, REPORTS_DIR
+    _get_supabase = _get_sb  # alias for readability
 
     # ── Test 1: Supabase secrets configured ──────────────────────────────────
     try:
@@ -43,23 +39,22 @@ def run_db_check():
 
     # ── Test 2: Supabase client creation ─────────────────────────────────────
     try:
-        sb, _ = _get_supabase(), None
-        sb = _get_supabase()  # returns client or None
+        sb = _get_supabase()
         if sb:
-            results["client"] = ("✅", "Client created", "supabase-py connected successfully")
+            results["client"] = ("✅", "Client created", "Direct REST API connected successfully")
         else:
-            results["client"] = ("❌", "Client failed", "Could not create Supabase client — check URL and KEY")
+            err = get_connection_error() or "Could not connect to Supabase"
+            results["client"] = ("❌", "Client failed", err)
     except Exception as e:
         results["client"] = ("❌", "Client error", str(e))
 
     # ── Test 3: Read from users table ─────────────────────────────────────────
     try:
-        from db import _get_supabase as _gsb
-        sb = _gsb()
+        from db import _get_sb
+        sb = _get_sb()
         if sb:
-            res  = sb.table("users").select("username").limit(1).execute()
-            cnt  = len(res.data) if res.data else 0
-            results["read_users"] = ("✅", "Users table readable", f"Query successful — {cnt} row(s) returned")
+            rows = sb.select("users", cols="username", limit=1)
+            results["read_users"] = ("✅", "Users table readable", f"Query successful — {len(rows)} row(s) returned")
         else:
             results["read_users"] = ("⚠️", "Skipped", "No Supabase client")
     except Exception as e:
@@ -67,12 +62,11 @@ def run_db_check():
 
     # ── Test 4: Read from submissions table ──────────────────────────────────
     try:
-        from db import _get_supabase as _gsb
-        sb = _gsb()
+        from db import _get_sb
+        sb = _get_sb()
         if sb:
-            res  = sb.table("submissions").select("id").limit(1).execute()
-            cnt  = len(res.data) if res.data else 0
-            results["read_subs"] = ("✅", "Submissions table readable", f"Query successful — {cnt} row(s) returned")
+            rows = sb.select("submissions", cols="id", limit=1)
+            results["read_subs"] = ("✅", "Submissions table readable", f"Query successful — {len(rows)} row(s) returned")
         else:
             results["read_subs"] = ("⚠️", "Skipped", "No Supabase client")
     except Exception as e:
@@ -80,8 +74,8 @@ def run_db_check():
 
     # ── Test 5: Write + delete test row ──────────────────────────────────────
     try:
-        from db import _get_supabase as _gsb
-        sb = _gsb()
+        from db import _get_sb
+        sb = _get_sb()
         if sb:
             test_user = {
                 "username":   "__db_test__",
@@ -95,16 +89,13 @@ def run_db_check():
                 "reports":    [],
                 "finance":    {},
             }
-            # Insert
-            sb.table("users").upsert(test_user).execute()
-            # Read back
-            res = sb.table("users").select("username").eq("username","__db_test__").execute()
-            if res.data:
-                # Delete test row
-                sb.table("users").delete().eq("username","__db_test__").execute()
-                results["write"] = ("✅", "Write & delete successful", "Inserted, read back, and deleted a test row — DB is fully working")
+            sb.upsert("users", test_user)
+            rows = sb.select("users", cols="username", filters={"username":"__db_test__"})
+            if rows:
+                sb.delete("users", {"username":"__db_test__"})
+                results["write"] = ("✅", "Write & delete successful", "Inserted, read back, and deleted test row — DB fully working!")
             else:
-                results["write"] = ("❌", "Write failed", "Row was inserted but could not be read back")
+                results["write"] = ("❌", "Write failed", "Row inserted but could not be read back")
         else:
             results["write"] = ("⚠️", "Skipped", "No Supabase client")
     except Exception as e:
@@ -145,13 +136,7 @@ def fmt_amt(n):
     except Exception:
         return "₹—"
 
-def _load_submissions():
-    if SUBS_FILE.exists():
-        try:
-            return json.loads(SUBS_FILE.read_text())
-        except Exception:
-            return []
-    return []
+# _load_submissions removed — use db.load_submissions() instead
 
 def _score_badge(score):
     try:
@@ -608,17 +593,21 @@ def render():
               </div>
             </div>""", unsafe_allow_html=True)
         else:
-            st.markdown("""
+            conn_err = get_connection_error()
+            err_html = f"<div style=\'background:#fef2f2;border:1px solid #fca5a5;border-radius:8px;padding:8px 12px;margin-top:8px;font-family:monospace;font-size:.8rem;color:#991b1b\'>{conn_err}</div>" if conn_err else ""
+            st.markdown(f"""
             <div style="background:#fffbeb;border:2px solid #fcd34d;border-radius:14px;
-                        padding:20px 28px;margin:12px 0;display:flex;align-items:center;gap:16px">
-              <div style="font-size:2.5rem">🟡</div>
-              <div>
-                <div style="font-weight:700;color:#92400e;font-size:1.1rem">Local JSON Mode</div>
-                <div style="color:#78350f;font-size:.85rem;margin-top:2px">
-                  Data is stored in local files only. On Streamlit Cloud, users will be 
-                  lost on every restart. Add SUPABASE_URL and SUPABASE_KEY to Secrets to fix this.
+                        padding:20px 28px;margin:12px 0">
+              <div style="display:flex;align-items:center;gap:16px">
+                <div style="font-size:2.5rem">🟡</div>
+                <div>
+                  <div style="font-weight:700;color:#92400e;font-size:1.1rem">Not Connected to Supabase</div>
+                  <div style="color:#78350f;font-size:.85rem;margin-top:2px">
+                    Data stored in local files only — users lost on Streamlit Cloud restart.
+                  </div>
                 </div>
               </div>
+              {err_html}
             </div>""", unsafe_allow_html=True)
 
         # Show secrets status
@@ -658,8 +647,16 @@ def render():
         st.markdown('<div class="astl">🧪 Run Full Connection Test</div>', unsafe_allow_html=True)
         st.caption("Tests each step: secrets → client → read users table → read submissions table → write test row → delete test row")
 
-        if st.button("▶️ Run DB Health Check Now", type="primary", use_container_width=False, key="btn_run_dbcheck"):
-            with st.spinner("Running tests..."):
+        bc1, bc2 = st.columns([2,1])
+        with bc1: run_check = st.button("▶️ Run DB Health Check Now", type="primary", use_container_width=True, key="btn_run_dbcheck")
+        with bc2:
+            if st.button("🔄 Reset Connection", use_container_width=True, key="btn_reset_conn"):
+                reset_connection()
+                st.success("Connection reset — run health check again.")
+                st.rerun()
+        if run_check:
+            with st.spinner("Running connection tests..."):
+                reset_connection()  # force fresh connection test
                 results = run_db_check()
 
             test_labels = {
@@ -707,17 +704,24 @@ def render():
 4. This creates the `users` and `submissions` tables with correct structure
 5. Re-run the health check above
             """)
-        with st.expander("❌ Secrets not set / client failed"):
+        with st.expander("❌ Secrets not set / client failed — click to fix"):
             st.markdown("""
-1. Go to **share.streamlit.io → your app → Settings → Secrets**
-2. Paste:
-```
-SUPABASE_URL = "https://xxxx.supabase.co"
-SUPABASE_KEY = "your-anon-public-key"
-```
-3. Get these from **Supabase → Settings → API**
-4. Click **Save** then **Reboot app**
+**The most common cause:** Wrong Supabase key type.
+
+Supabase now shows two keys in Settings → API:
+- ❌ `sb_publishable_...` — this is the NEW format publishable key — **DO NOT USE**
+- ✅ `eyJhbGci...` — this is the JWT anon key — **USE THIS ONE**
+
+**Steps to get the correct key:**
+1. Go to your Supabase project
+2. Click **Settings** (gear icon) → **API**
+3. Scroll to **Project API keys**
+4. Copy the key labelled **anon** / **public** — it starts with `eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...`
+5. Go to Streamlit Cloud → your app → **Settings → Secrets**
+6. Update `SUPABASE_KEY` with the `eyJ...` key
+7. Click **Save** → **Reboot app**
             """)
+            st.warning("⚠️ If your key starts with `sb_pub` or `sb_publishable` — that is the wrong key. You need the long JWT key starting with `eyJ`.")
         with st.expander("✅ Connected but users still disappear?"):
             st.markdown("""
 - Make sure `SUPABASE_URL` and `SUPABASE_KEY` are set in Streamlit Secrets
