@@ -21,10 +21,13 @@ from auth import (signup, login, save_user_report, all_users,
                   get_user, save_finance, load_finance, update_profile,
                   delete_user, admin_update_user)
 from database import save_submission, load_submissions, save_user_report, db_path
+from admin import render as render_admin
 # DATA_DIR already imported above
 
+DATA_DIR = Path(__file__).parent / "data"
 REPORTS_DIR = DATA_DIR / "reports"
 REPORTS_DIR.mkdir(exist_ok=True)
+
 
 from admin import render as render_admin
 

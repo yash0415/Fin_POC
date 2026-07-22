@@ -8,9 +8,9 @@ import pandas as pd
 from pathlib import Path
 from datetime import datetime
 from auth import all_users, delete_user, admin_update_user, get_user
-from database import load_submissions, get_stats, db_path, DATA_DIR
+from database import load_submissions, get_stats, db_path, DB_DIR
 
-REPORTS_DIR = DATA_DIR / "reports"
+REPORTS_DIR = DB_DIR / "reports"
 REPORTS_DIR.mkdir(exist_ok=True)
 
 # DATA_DIR, REPORTS_DIR, SUBS_FILE come from db.py imports

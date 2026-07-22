@@ -8,8 +8,9 @@ import json
 from pathlib import Path
 from datetime import datetime
 
-DB_DIR  = Path(__file__).parent / "data"
-DB_PATH = DB_DIR / "finsight.db"
+DB_DIR   = Path(__file__).parent / "data"
+DATA_DIR = DB_DIR
+DB_PATH  = DB_DIR / "finsight.db"
 DB_DIR.mkdir(exist_ok=True)
 
 
