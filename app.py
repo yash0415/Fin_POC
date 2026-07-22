@@ -62,8 +62,8 @@ try:
     ADMIN_USER = st.secrets["ADMIN_USER"]
     ADMIN_PASS = st.secrets["ADMIN_PASS"]
 except Exception:
-    ADMIN_USER = "yashwankar"
-    ADMIN_PASS = "Yash@2025#FS"
+    ADMIN_USER = "admin"
+    ADMIN_PASS = "888888"
 
 PAGES = [
     "🏠  Profile & Income",
