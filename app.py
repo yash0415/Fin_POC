@@ -20,13 +20,13 @@ from datetime import datetime, date
 from auth import (signup, login, save_user_report, all_users,
                   get_user, save_finance, load_finance, update_profile,
                   delete_user, admin_update_user)
-from admin import render as render_admin
+from database import save_submission, load_submissions, save_user_report, db_path
+from database import DATA_DIR, DB_DIR as _DB_DIR
 
-DATA_DIR    = Path(__file__).parent / "data"
 REPORTS_DIR = DATA_DIR / "reports"
-SUBS_FILE   = DATA_DIR / "submissions.json"
-DATA_DIR.mkdir(exist_ok=True)
 REPORTS_DIR.mkdir(exist_ok=True)
+
+from admin import render as render_admin
 
 # ══════════════════════════════════════════════════════════════════════════════
 # ░░  CONFIG  ░░
@@ -90,7 +90,7 @@ DATA_DIR.mkdir(exist_ok=True)
 REPORTS_DIR.mkdir(exist_ok=True)
 
 def save_report_to_disk(pdf_bytes, meta):
-    """Save PDF and metadata to local files. Returns filename."""
+    """Save PDF to disk and metadata to SQLite. Returns filename."""
     ts    = datetime.now().strftime("%Y%m%d_%H%M%S")
     safe  = (meta.get("name","Client") or "Client").replace(" ","_")
     fname = f"{ts}_{safe}.pdf"
@@ -98,18 +98,12 @@ def save_report_to_disk(pdf_bytes, meta):
     except Exception: pass
     meta["pdf_file"] = fname
     meta["saved_at"] = ts
-    # Save metadata to submissions log
-    try:
-        subs = []
-        if SUBS_FILE.exists():
-            try: subs = json.loads(SUBS_FILE.read_text())
-            except: pass
-        subs.append(meta)
-        SUBS_FILE.write_text(json.dumps(subs, indent=2, ensure_ascii=False))
-    except Exception: pass
+    # Save to SQLite
+    save_submission(meta)
     uname = meta.get("username","")
     if uname:
-        save_user_report(uname, {k: meta.get(k,"") for k in ["pdf_file","saved_at","score","score_label","net_worth"]})
+        save_user_report(uname, {k: meta.get(k,"") for k in
+                                  ["pdf_file","saved_at","score","score_label","net_worth"]})
     return fname
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1691,11 +1685,11 @@ elif page == "📊  Dashboard & Report":
                             f"_{(s.name or 'Client').replace(' ','_')}_ss.{ext}"
                         )
                         (REPORTS_DIR / ss_fname).write_bytes(screenshot.getvalue())
-                        # patch screenshot filename back into submissions log
+                        # Update SQLite record with screenshot filename
                         try:
-                            subs = json.loads(SUBS_FILE.read_text()) if SUBS_FILE.exists() else []
-                            if subs: subs[-1]["screenshot_file"] = ss_fname
-                            SUBS_FILE.write_text(json.dumps(subs, indent=2))
+                            from database import update_submission_screenshot
+                            update_submission_screenshot(
+                                st.session_state.get("pdf_filename",""), ss_fname)
                         except Exception: pass
                         st.session_state.saved_name = saved_name
                     except Exception:

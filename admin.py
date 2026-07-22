@@ -8,23 +8,10 @@ import pandas as pd
 from pathlib import Path
 from datetime import datetime
 from auth import all_users, delete_user, admin_update_user, get_user
-import json
+from database import load_submissions, get_stats, db_path, DATA_DIR
 
-DATA_DIR    = Path(__file__).parent / "data"
 REPORTS_DIR = DATA_DIR / "reports"
-SUBS_FILE   = DATA_DIR / "submissions.json"
-DATA_DIR.mkdir(exist_ok=True)
 REPORTS_DIR.mkdir(exist_ok=True)
-
-def load_submissions():
-    if SUBS_FILE.exists():
-        try: return json.loads(SUBS_FILE.read_text())
-        except: return []
-    return []
-
-def is_supabase_connected(): return False
-def get_connection_error(): return ""
-def reset_connection(): pass
 
 # DATA_DIR, REPORTS_DIR, SUBS_FILE come from db.py imports
 
@@ -160,16 +147,17 @@ def render():
     st.markdown(ADMIN_CSS, unsafe_allow_html=True)
 
     # ── Hero Banner ───────────────────────────────────────────────────────────
-    st.markdown("""<div class="admin-hero"><h2>🛡️ Admin Dashboard</h2><p>Yash Wankar · FinSight Portal · All reports & users</p></div>""", unsafe_allow_html=True)
+    stats = get_stats()
+    st.markdown(f"""<div class="admin-hero">
+      <h2>🛡️ Admin Dashboard</h2>
+      <p>Yash Wankar · FinSight Portal · SQLite DB: <code style="opacity:.7">{db_path()}</code></p>
+    </div>""", unsafe_allow_html=True)
 
-    users = all_users()
-    subs  = load_submissions()
-    pdfs  = sorted(REPORTS_DIR.glob("*.pdf"), reverse=True)
-
-    paid_subs  = [s for s in subs if s.get("paid")]
-    auto_subs  = [s for s in subs if s.get("auto_save")]
-    pend_subs  = [s for s in subs if not s.get("paid") and not s.get("auto_save")]
-    total_rev  = len(paid_subs) * 100
+    users     = all_users()
+    subs      = load_submissions()
+    pdfs      = sorted(REPORTS_DIR.glob("*.pdf"), reverse=True)
+    paid_subs = [s for s in subs if s.get("paid")]
+    auto_subs = [s for s in subs if s.get("auto_save")]
 
     # ── KPI Row ───────────────────────────────────────────────────────────────
     k1, k2, k3, k4, k5 = st.columns(5)
@@ -180,7 +168,7 @@ def render():
     with k3:
         st.markdown(f'<div class="akpi"><div class="akpi-lbl">Paid Reports</div><div class="akpi-val">{len(paid_subs)}</div></div>', unsafe_allow_html=True)
     with k4:
-        st.markdown(f'<div class="akpi p"><div class="akpi-lbl">Revenue Collected</div><div class="akpi-val">₹{total_rev:,}</div></div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="akpi p"><div class="akpi-lbl">Revenue Collected</div><div class="akpi-val">₹{len(paid_subs)*100:,}</div></div>', unsafe_allow_html=True)
     with k5:
         st.markdown(f'<div class="akpi a"><div class="akpi-lbl">Total PDF Files</div><div class="akpi-val">{len(pdfs)}</div><div class="akpi-sub">in data/reports/</div></div>', unsafe_allow_html=True)
 
